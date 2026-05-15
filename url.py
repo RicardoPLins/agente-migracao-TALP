@@ -1,12 +1,13 @@
- def create_user(self, user_info):
-        try:
-            return self.client.post_json('users/', user_info)
+ try:
+            resp = self.client.post_json_raw_response(
+                'groups/', group_info)
         except urllib2.HTTPError, err:
             if err.code == 400:
                 raise self.BadParams()
-            if err.code == 402:
-                raise self.PaymentRequired()
             elif err.code == 409:
                 data = json.loads(err.read())
-                if 'username' in data['conflicts']:
-                    raise self.DuplicateUsername()
+                if 'name' in data['conflicts']:
+                    raise self.DuplicateGroupName()
+                elif 'plan_id' in data['conflicts']:
+                    raise self.BadPlan()
+            raise
