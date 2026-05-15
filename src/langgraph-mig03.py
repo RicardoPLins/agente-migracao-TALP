@@ -2,11 +2,11 @@
 LLM-Powered Migration Agent - urllib to requests
 
 This agent uses LangGraph with an LLM (Claude) to intelligently migrate
-urllib code to requests. It learns from 20 real-world examples from the dataset
+urllib code to requests. It learns from more real-world examples from the dataset
 to understand migration patterns and context.
 
 Architecture:
-1. Load first 20 examples from dataset
+1. Load a larger set of examples from dataset
 2. Create few-shot training prompt
 3. Build agent with conditional routing
 4. Process user's urllib code through migration pipeline
@@ -95,11 +95,11 @@ Key migration rules:
 5. EXCEPTIONS: Replace urllib.error exceptions with requests.exceptions
 6. POST DATA: Convert urllib requests with data parameter to requests.post()
 
-Here are 20 real-world examples from GitHub migrations:
+    Here are the real-world examples from GitHub migrations:
 
 """
     
-    for i, exemplo in enumerate(exemplos[:20], 1):
+    for i, exemplo in enumerate(exemplos, 1):
         prompt += f"\n{'='*80}\nExample {i}: {exemplo['repo']} ({exemplo['type']})\n{'='*80}\n"
         prompt += f"\nBEFORE (urllib):\n```python\n{exemplo['before']}\n```\n"
         prompt += f"\nAFTER (requests):\n```python\n{exemplo['after']}\n```\n"
@@ -200,10 +200,10 @@ def no_migrar_com_llm(estado: EstadoAgente, exemplos_treino: list[dict], prompt_
     
     try:
         # Initialize Groq model with API key
-        groq_api_key = os.getenv("GROQ_KEY", "")
+        groq_api_key = os.getenv("GROQ_KEY", "") or os.getenv("API_KEY", "")
 
         model = ChatGroq(
-            model="llama-3.1-8b-instant",
+            model="llama-3.3-70b-versatile",
             temperature=0,
             groq_api_key=groq_api_key,
         )
@@ -364,7 +364,7 @@ if __name__ == "__main__":
     
     # Load training examples
     print("\n📚 Carregando exemplos de treinamento...")
-    exemplos_treino = carregar_exemplos_treino(20)
+    exemplos_treino = carregar_exemplos_treino(30)
     
     if not exemplos_treino:
         print("❌ Não foi possível carregar exemplos de treinamento!")
