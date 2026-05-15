@@ -1,0 +1,27 @@
+{
+  "intencao_principal": "Criar um novo usuário",
+  "resumo_comportamento": "Tenta criar um novo usuário enviando uma requisição POST com informações do usuário para o endpoint 'users/'. Caso ocorra um erro, analisa o código de status da resposta e lança uma exceção específica com base no código de erro.",
+  "entradas": [
+    "user_info (dicionário com informações do usuário)"
+  ],
+  "saidas": [
+    "Resposta da requisição POST (sucesso ou exceção)"
+  ],
+  "efeitos_colaterais": [
+    "Criação de um novo usuário no sistema",
+    "Leitura de dados de erro da resposta HTTP"
+  ],
+  "dependencias_externas": [
+    "urllib2 (para realizar a requisição HTTP)",
+    "json (para parsear a resposta de erro)"
+  ],
+  "riscos_migracao": [
+    "Alterações no endpoint 'users/' ou no formato da resposta de erro",
+    "Mudanças na biblioteca urllib2 ou json"
+  ],
+  "regras_preservacao": [
+    "Manter a mesma lógica de tratamento de erros (códigos de status 400, 402 e 409)",
+    "Preservar a criação de um novo usuário no sistema",
+    "Manter a compatibilidade com as bibliotecas externas utilizadas"
+  ]
+}
