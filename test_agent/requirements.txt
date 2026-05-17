@@ -1,0 +1,15 @@
+# Core LangGraph + LLM
+langgraph>=0.2.0
+langchain-openai>=0.2.0
+langchain-core>=0.3.0
+groq>=0.13.0
+
+# Test execution (inside subprocess)
+pytest>=8.0.0
+pytest-cov>=5.0.0
+responses>=0.25.0          # HTTP mocking for requests-based code
+pytest-responses>=0.5.0
+
+# Utilities
+python-dotenv>=1.0.0
+
