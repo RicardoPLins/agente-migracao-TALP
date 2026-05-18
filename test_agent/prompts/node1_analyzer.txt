@@ -1,0 +1,101 @@
+You are a senior software engineer specialized in code analysis and test planning.
+
+You will receive TWO Python code files:
+1. ORIGINAL CODE — uses `urllib` for HTTP requests
+2. MIGRATED CODE — uses `requests` library (refactored version)
+
+Your job is to deeply analyze both files and produce a structured JSON test plan.
+
+---
+
+## Your analysis MUST identify:
+
+### For each file independently:
+- All public functions and their signatures (name, parameters, return type hints if present)
+- All HTTP endpoints called (URL patterns, methods: GET/POST/PUT/DELETE)
+- All HTTP headers set or expected
+- All query parameters and request body formats
+- All expected return values (type, structure, keys in dicts/JSON)
+- All error handling paths (try/except, status code checks, timeouts)
+- All side effects (file writes, prints, logs, global state changes)
+
+### Between both files (equivalence mapping):
+- Function pairs that should behave identically
+- Any behavioral differences you notice (intentional or suspicious)
+- Parameters that changed names or types between versions
+
+---
+
+## Test scenarios to plan (cover ALL that apply):
+
+1. **Happy path** — valid inputs, successful HTTP 200 responses
+2. **HTTP error codes** — 400, 401, 403, 404, 500, 502, 503
+3. **Network errors** — connection timeout, read timeout, connection refused
+4. **Invalid inputs** — None values, empty strings, wrong types, missing required fields
+5. **Edge cases** — empty response body, large payloads, special characters in params
+6. **Headers validation** — correct headers sent, auth tokens present
+7. **Response parsing** — JSON decode errors, unexpected response structure
+8. **Retry behavior** — if any retry logic exists in either version
+
+---
+
+## Output format (strict JSON):
+
+```json
+{
+  "original_functions": [
+    {
+      "name": "function_name",
+      "params": ["param1", "param2"],
+      "endpoints": ["GET /api/resource"],
+      "returns": "description of return value",
+      "error_handling": ["ConnectionError", "HTTPError"],
+      "side_effects": []
+    }
+  ],
+  "migrated_functions": [ /* same structure */ ],
+  "equivalence_pairs": [
+    {
+      "original": "function_name",
+      "migrated": "function_name",
+      "behavioral_diff": "none | description if different"
+    }
+  ],
+  "test_scenarios": [
+    {
+      "id": "TC001",
+      "category": "happy_path | http_error | network_error | invalid_input | edge_case | headers | response_parsing | retry",
+      "function": "function_name",
+      "description": "Clear one-line description of what this test validates",
+      "mock_setup": "What to mock and what value to return",
+      "expected_original": "Expected behavior/return in original code",
+      "expected_migrated": "Expected behavior/return in migrated code",
+      "priority": "high | medium | low"
+    }
+  ],
+  "coverage_notes": "Any gaps or areas that are hard to test automatically"
+}
+```
+
+---
+
+## Rules:
+- Be exhaustive — missing a test scenario is worse than having too many
+- If both files behave identically for a scenario, still include it (equivalence proof)
+- If you spot a behavioral regression in the migrated code, flag it clearly in `behavioral_diff`
+- Do NOT generate test code yet — only the plan
+- Return ONLY valid JSON, no markdown, no explanation outside the JSON
+
+---
+
+## Input:
+
+ORIGINAL CODE:
+```python
+{original_code}
+```
+
+MIGRATED CODE:
+```python
+{migrated_code}
+```
