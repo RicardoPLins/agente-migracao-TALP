@@ -1,27 +1,29 @@
 {
-  "intencao_principal": "Criar um novo usuário",
-  "resumo_comportamento": "Tenta criar um novo usuário enviando uma requisição POST com informações do usuário para o endpoint 'users/'. Caso ocorra um erro, analisa o código de status da resposta e lança uma exceção específica com base no código de erro.",
+  "intencao_principal": "Realizar uma requisição HTTP para obter dados em formato JSON de um servidor",
+  "resumo_comportamento": "O código constrói uma URL de requisição, adiciona parâmetros e cabeçalhos, envia a requisição e decodifica a resposta JSON",
   "entradas": [
-    "user_info (dicionário com informações do usuário)"
+    "method",
+    "parameters"
   ],
   "saidas": [
-    "Resposta da requisição POST (sucesso ou exceção)"
+    "json_decoded['d']"
   ],
   "efeitos_colaterais": [
-    "Criação de um novo usuário no sistema",
-    "Leitura de dados de erro da resposta HTTP"
+    "Requisição HTTP enviada para o servidor",
+    "Leitura de dados do servidor"
   ],
   "dependencias_externas": [
-    "urllib2 (para realizar a requisição HTTP)",
-    "json (para parsear a resposta de erro)"
+    "urllib",
+    "toutv.config"
   ],
   "riscos_migracao": [
-    "Alterações no endpoint 'users/' ou no formato da resposta de erro",
-    "Mudanças na biblioteca urllib2 ou json"
+    "Mudanças na estrutura da URL ou nos parâmetros",
+    "Alterações na resposta JSON do servidor",
+    "Problemas de compatibilidade com bibliotecas externas"
   ],
   "regras_preservacao": [
-    "Manter a mesma lógica de tratamento de erros (códigos de status 400, 402 e 409)",
-    "Preservar a criação de um novo usuário no sistema",
-    "Manter a compatibilidade com as bibliotecas externas utilizadas"
+    "Manter a estrutura da URL e dos parâmetros",
+    "Preservar a decodificação correta da resposta JSON",
+    "Manter a compatibilidade com bibliotecas externas"
   ]
 }

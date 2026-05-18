@@ -1,12 +1,12 @@
- def create_user(self, user_info):
-        try:
-            return self.client.post_json('users/', user_info)
-        except urllib2.HTTPError, err:
-            if err.code == 400:
-                raise self.BadParams()
-            if err.code == 402:
-                raise self.PaymentRequired()
-            elif err.code == 409:
-                data = json.loads(err.read())
-                if 'username' in data['conflicts']:
-                    raise self.DuplicateUsername()
+    def _do_query(self, method, parameters={}):
+        parameters_str = urllib.parse.urlencode(parameters)
+        url = ''.join([
+            toutv.config.TOUTV_JSON_URL,
+            method,
+            '?',
+        parameters_str])
+        headers = {'User-Agent': toutv.config.USER_AGENT}
+        request = urllib.request.Request(url, None, headers)
+        json_string = urllib.request.urlopen(request).read().decode('utf-8')
+        json_decoded = self.json_decoder.decode(json_string)
+        return json_decoded['d']
