@@ -1,5 +1,6 @@
 from typing import TypedDict, List, Dict
 from langchain_groq import ChatGroq
+from langchain_ollama import ChatOllama
 import os
 from langgraph.graph import StateGraph, END
 from fastapi import FastAPI
@@ -24,11 +25,17 @@ class SimpleCodeReviewAgent:
         if not api_key:
             raise ValueError("A variável de ambiente GROQ_API_KEY não foi encontrada no sistema!")
 
-        self.llm = ChatGroq(
-            api_key=api_key,
-            model_name="llama-3.3-70b-versatile",
-            temperature=0.0
+        # self.llm = ChatGroq(
+        #     api_key=api_key,
+        #     model_name="llama-3.3-70b-versatile",
+        #     temperature=0.0
+        # )
+        self.llm = ChatOllama(
+            model="llama3",
+            temperature=0
         )
+
+
         self.graph = self._build_graph()
 
     def _analysis_agent(self, state: CodeReviewState) -> Dict:

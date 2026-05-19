@@ -19,6 +19,7 @@ from langgraph.graph.message import add_messages
 from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from langchain_groq import ChatGroq
+from langchain_ollama import ChatOllama
 import openpyxl
 import os
 import json
@@ -33,6 +34,9 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"), overrid
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 URL_MIGRATE_PATH = PROJECT_ROOT / "url-migrate.py"
 INFERENCE_JSON_PATH = PROJECT_ROOT / "inferencia.json"
+
+# When this file is imported (e.g., by the API gateway), avoid writing files.
+WRITE_ARTIFACTS = __name__ == "__main__"
 # =============================================================================
 # DATASET LOADING & TRAINING EXAMPLES
 # =============================================================================
@@ -243,12 +247,16 @@ def no_inferir_semantica(estado: EstadoAgente) -> dict:
         }
 
     try:
-        groq_api_key = os.getenv("GROQ_KEY", "") or os.getenv("API_KEY", "")
+        groq_api_key = os.getenv("GROQ_API_KEY", "") or os.getenv("GROQ_KEY", "") or os.getenv("API_KEY", "")
 
-        model = ChatGroq(
-            model="llama-3.3-70b-versatile",
-            temperature=0,
-            groq_api_key=groq_api_key,
+        # model = ChatGroq(
+        #     model="llama-3.3-70b-versatile",
+        #     temperature=0,
+        #     groq_api_key=groq_api_key,
+        # )
+        model = ChatOllama(
+            model="llama3",
+            temperature=0
         )
 
         prompt_inferencia = """Você é um analista de comportamento de código Python.
@@ -297,8 +305,9 @@ Retorne SOMENTE JSON válido com esta estrutura:
             else:
                 inferencia_dict = inferencia_fallback("LLM não retornou JSON válido; usado fallback heurístico.")
 
-        with open(INFERENCE_JSON_PATH, "w", encoding="utf-8") as arquivo:
-            json.dump(inferencia_dict, arquivo, ensure_ascii=False, indent=2)
+        if WRITE_ARTIFACTS:
+            with open(INFERENCE_JSON_PATH, "w", encoding="utf-8") as arquivo:
+                json.dump(inferencia_dict, arquivo, ensure_ascii=False, indent=2)
 
         return {
             "messages": [AIMessage(content=f"🧠 Inferência semântica concluída e salva em: {INFERENCE_JSON_PATH}")],
@@ -308,8 +317,9 @@ Retorne SOMENTE JSON válido com esta estrutura:
 
     except Exception as e:
         inferencia_dict = inferencia_fallback(f"Erro no nó de inferência semântica: {str(e)}")
-        with open(INFERENCE_JSON_PATH, "w", encoding="utf-8") as arquivo:
-            json.dump(inferencia_dict, arquivo, ensure_ascii=False, indent=2)
+        if WRITE_ARTIFACTS:
+            with open(INFERENCE_JSON_PATH, "w", encoding="utf-8") as arquivo:
+                json.dump(inferencia_dict, arquivo, ensure_ascii=False, indent=2)
 
         return {
             "messages": [AIMessage(content=f"⚠️ Inferência semântica gerada via fallback e salva em: {INFERENCE_JSON_PATH}")],
@@ -333,13 +343,10 @@ def no_migrar_com_llm(estado: EstadoAgente, exemplos_treino: list[dict], prompt_
     codigo_usuario = estado["codigo_usuario"]
     
     try:
-        # Initialize Groq model with API key
-        groq_api_key = os.getenv("GROQ_KEY", "") or os.getenv("API_KEY", "")
-
-        model = ChatGroq(
-            model="llama-3.3-70b-versatile",
-            temperature=0,
-            groq_api_key=groq_api_key,
+        # Use local Ollama model for migration (no rate limits, free)
+        model = ChatOllama(
+            model="llama3",
+            temperature=0
         )
         
         # Create messages
@@ -365,7 +372,7 @@ Return ONLY the migrated Python code without any explanation or markdown.""")
                 codigo_migrado = codigo_migrado[6:]
             codigo_migrado = codigo_migrado.strip()
         
-        mensagem = "🔄 Migração concluída com sucesso usando Groq"
+        mensagem = "🔄 Migração concluída com sucesso usando Ollama (local)"
         
         return {
             "messages": [AIMessage(content=mensagem)],
@@ -393,9 +400,20 @@ def no_validar_migracao(estado: EstadoAgente) -> dict:
         Validation results
     """
     codigo_migrado = estado.get("codigo_migrado", "")
+
+    codigo_lower = codigo_migrado.lower()
+    contem_urllib_legado = any(
+        token in codigo_lower
+        for token in [
+            "urllib.request",
+            "urllib2",
+            "urllib.error",
+            "urlopen(",
+        ]
+    )
     
     validacoes = {
-        "Sem imports urllib": "urllib" not in codigo_migrado,
+        "Sem urllib legado (request/error/urlopen)": not contem_urllib_legado,
         "Com import requests": "import requests" in codigo_migrado or "requests." in codigo_migrado,
         "Sem urlopen direto": "urlopen(" not in codigo_migrado,
         "Código não vazio": len(codigo_migrado) > 0,

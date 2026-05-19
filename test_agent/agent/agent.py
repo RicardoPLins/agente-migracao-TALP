@@ -13,10 +13,13 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import TypedDict
+import importlib.util
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 from langgraph.graph import StateGraph, END
+from langchain_groq import ChatGroq
+from langchain_ollama import ChatOllama
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -27,10 +30,16 @@ MAX_ITERATIONS = 3
 COVERAGE_THRESHOLD = 80.0
 EQUIVALENCE_THRESHOLD = 90.0
 
-llm = ChatOpenAI(
-    model="qwen/qwen3-32b",
-    base_url=os.getenv("PROVIDER_BASE_URL"),
-    api_key=os.getenv("PROVIDER_API_KEY"),
+api_key = os.getenv("GROQ_API_KEY") or os.getenv("GROQ_KEY") or os.getenv("API_KEY")
+# llm = ChatGroq(
+#         api_key=api_key,
+#         model_name="llama-3.3-70b-versatile",
+#         temperature=0.0
+#             )
+
+llm = ChatOllama(
+    model="llama3",
+    temperature=0
 )
 
 # ── Paths to prompts ──────────────────────────────────────────────────────────
@@ -126,9 +135,58 @@ def node_generator(state: AgentState) -> AgentState:
 
 def node_executor(state: AgentState) -> AgentState:
     print("[Executor] Running tests...")
+    # Check that pytest is available
+    if importlib.util.find_spec("pytest") is None:
+        msg = (
+            "pytest is not installed in the current environment.\n"
+            "Please install test dependencies, e.g.:\n"
+            "  pip install pytest pytest-cov\n"
+            "or\n"
+            "  pip install -r requirements.txt\n"
+        )
+        print("[Executor] ", msg)
+        pytest_out_original = "ERROR: pytest not installed\n" + msg
+        pytest_out_migrated = pytest_out_original
+        coverage_report = pytest_out_original
+        return {
+            **state,
+            "pytest_output_original": pytest_out_original,
+            "pytest_output_migrated": pytest_out_migrated,
+            "coverage_report": coverage_report,
+        }
 
+    # Create temp dir and write files
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
+
+        # Pre-check Python syntax to avoid pytest import errors
+        try:
+            compile(state["original_code"], "original_module.py", "exec")
+        except SyntaxError as e:
+            pytest_out_original = f"SYNTAX ERROR in original_code: {e!r}\n"
+            pytest_out_migrated = ""
+            coverage_report = pytest_out_original
+            print("[Executor] ", pytest_out_original)
+            return {
+                **state,
+                "pytest_output_original": pytest_out_original,
+                "pytest_output_migrated": pytest_out_migrated,
+                "coverage_report": coverage_report,
+            }
+
+        try:
+            compile(state["migrated_code"], "migrated_module.py", "exec")
+        except SyntaxError as e:
+            pytest_out_original = ""
+            pytest_out_migrated = f"SYNTAX ERROR in migrated_code: {e!r}\n"
+            coverage_report = pytest_out_migrated
+            print("[Executor] ", pytest_out_migrated)
+            return {
+                **state,
+                "pytest_output_original": pytest_out_original,
+                "pytest_output_migrated": pytest_out_migrated,
+                "coverage_report": coverage_report,
+            }
 
         (tmpdir / "original_module.py").write_text(state["original_code"])
         (tmpdir / "migrated_module.py").write_text(state["migrated_code"])
@@ -281,6 +339,26 @@ def run_agent(original_code: str, migrated_code: str) -> dict:
     return final_state
 
 
+def run_agent_from_review_output(review_output: dict) -> dict:
+    """Run the agent using the JSON produced by review_agent.
+
+    Expected keys:
+      - original_code
+      - migrated_code
+
+    Additional keys are ignored (semantic_inference, review, etc.).
+    """
+    if not isinstance(review_output, dict):
+        raise TypeError("review_output must be a dict")
+
+    original_code = (review_output.get("original_code") or "").strip()
+    migrated_code = (review_output.get("migrated_code") or "").strip()
+    if not original_code or not migrated_code:
+        raise ValueError("review_output must include non-empty original_code and migrated_code")
+
+    return run_agent(original_code, migrated_code)
+
+
 # ── Mock de entrada (temporário até integração com os outros agentes) ─────────
 
 MOCK_ORIGINAL = """
@@ -312,6 +390,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run equivalence test agent")
     parser.add_argument("--original", help="Path to original (urllib) Python file")
     parser.add_argument("--migrated", help="Path to migrated (requests) Python file")
+    parser.add_argument("--input-json", dest="input_json", help="Path to JSON produced by review_agent")
     parser.add_argument("--mock", action="store_true", help="Use mock input (integration not ready yet)")
     parser.add_argument("--output", default="report.md", help="Output report path")
     args = parser.parse_args()
@@ -320,13 +399,16 @@ if __name__ == "__main__":
         original = MOCK_ORIGINAL
         migrated = MOCK_MIGRATED
         print("[main] Using mock input")
+        result = run_agent(original, migrated)
+    elif args.input_json:
+        payload = json.loads(Path(args.input_json).read_text())
+        result = run_agent_from_review_output(payload)
     else:
         if not args.original or not args.migrated:
-            parser.error("--original and --migrated are required when not using --mock")
+            parser.error("--original and --migrated are required when not using --mock or --input-json")
         original = Path(args.original).read_text()
         migrated = Path(args.migrated).read_text()
-
-    result = run_agent(original, migrated)
+        result = run_agent(original, migrated)
 
     Path(args.output).write_text(result["report"])
     print(f"\n Report saved to {args.output}")
