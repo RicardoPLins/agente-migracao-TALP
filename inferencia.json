@@ -1,29 +1,38 @@
 {
-  "intencao_principal": "Realizar uma requisição HTTP para obter dados em formato JSON de um servidor",
-  "resumo_comportamento": "O código constrói uma URL de requisição, adiciona parâmetros e cabeçalhos, envia a requisição e decodifica a resposta JSON",
+  "intencao_principal": "Scraper de conversas do Facebook",
+  "resumo_comportamento": "O código é um scraper que recupera, manipula e armazena todas as mensagens pertencentes a uma conversa específica no Facebook.",
   "entradas": [
-    "method",
-    "parameters"
+    "ConversaID",
+    "Tamanho da chunk",
+    "Offset",
+    "Cookie",
+    "Fb_dtsg",
+    "UserID",
+    "Diretório de saída"
   ],
   "saidas": [
-    "json_decoded['d']"
+    "Arquivo JSON com as mensagens da conversa"
   ],
   "efeitos_colaterais": [
-    "Requisição HTTP enviada para o servidor",
-    "Leitura de dados do servidor"
+    "Geração de arquivos JSON para cada chunk de mensagens; geração de um arquivo JSON final com todas as mensagens"
   ],
   "dependencias_externas": [
-    "urllib",
-    "toutv.config"
+    "urllib.parse",
+    "urllib.request",
+    "gzip",
+    "os",
+    "json",
+    "sys",
+    "time",
+    "io",
+    "argparse",
+    "configparser",
+    "logging"
   ],
   "riscos_migracao": [
-    "Mudanças na estrutura da URL ou nos parâmetros",
-    "Alterações na resposta JSON do servidor",
-    "Problemas de compatibilidade com bibliotecas externas"
+    "Risco de perda de dados se o scraper não for configurado corretamente; risco de sobrecarga do sistema se o scraper for executado em um ambiente com recursos limitados"
   ],
   "regras_preservacao": [
-    "Manter a estrutura da URL e dos parâmetros",
-    "Preservar a decodificação correta da resposta JSON",
-    "Manter a compatibilidade com bibliotecas externas"
+    "Preservar a integridade dos dados recupetados; preservar a estrutura da conversa original"
   ]
 }
