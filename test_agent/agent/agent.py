@@ -14,10 +14,13 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import TypedDict
+import importlib.util
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 from langgraph.graph import StateGraph, END
+from langchain_groq import ChatGroq
+from langchain_ollama import ChatOllama
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -28,11 +31,16 @@ MAX_ITERATIONS = 3
 COVERAGE_THRESHOLD = 80.0
 EQUIVALENCE_THRESHOLD = 90.0
 
-llm = ChatOpenAI(
-    model="llama-3.3-70b-versatile",
-    base_url=os.getenv("PROVIDER_BASE_URL"),
-    api_key=os.getenv("PROVIDER_API_KEY"),
-    max_tokens=8192,
+api_key = os.getenv("GROQ_API_KEY") or os.getenv("GROQ_KEY") or os.getenv("API_KEY")
+# llm = ChatGroq(
+#         api_key=api_key,
+#         model_name="llama-3.3-70b-versatile",
+#         temperature=0.0
+#             )
+
+llm = ChatOllama(
+    model="llama3",
+    temperature=0
 )
 
 # ── Paths to prompts ──────────────────────────────────────────────────────────
@@ -142,7 +150,27 @@ def node_generator(state: AgentState) -> AgentState:
 
 def node_executor(state: AgentState) -> AgentState:
     print("[Executor] Running tests...")
+    # Check that pytest is available
+    if importlib.util.find_spec("pytest") is None:
+        msg = (
+            "pytest is not installed in the current environment.\n"
+            "Please install test dependencies, e.g.:\n"
+            "  pip install pytest pytest-cov\n"
+            "or\n"
+            "  pip install -r requirements.txt\n"
+        )
+        print("[Executor] ", msg)
+        pytest_out_original = "ERROR: pytest not installed\n" + msg
+        pytest_out_migrated = pytest_out_original
+        coverage_report = pytest_out_original
+        return {
+            **state,
+            "pytest_output_original": pytest_out_original,
+            "pytest_output_migrated": pytest_out_migrated,
+            "coverage_report": coverage_report,
+        }
 
+    # Create temp dir and write files
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
 
