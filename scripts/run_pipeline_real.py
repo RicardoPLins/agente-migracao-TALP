@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the real pipeline (migration -> review -> test) using live LLMs.
+"""Run the real pipeline (migration -> test -> review) using live LLMs.
 
 Prerequisites:
 - Set `GROQ_API_KEY` in env for migration+review.
@@ -7,8 +7,9 @@ Prerequisites:
 - Activate the repo venv and install requirements.
 
 This script will read code from an input file (or use `url.py` by default),
-call the migration agent, call the review agent, then call the test agent CLI
-via subprocess. Outputs are printed and saved into `./.run_output`.
+call the migration agent, call the test agent CLI via subprocess with the
+original and migrated Python code, then call the review agent. Outputs are
+printed and saved into `./.run_output`.
 """
 import json
 import os
@@ -27,7 +28,7 @@ load_dotenv(dotenv_path=REPO_ROOT / ".env", override=False)
 
 from agents.migration import run_migration
 from agents.review import run_migration_review
-from agents.equivalence_subprocess import run_equivalence_from_review_output
+from agents.equivalence_subprocess import run_equivalence
 
 
 def load_code(path: Path | str | None) -> str:
@@ -76,12 +77,20 @@ def main():
         print(f"Partial output saved to {out_dir.resolve() / 'pipeline_output.json'}")
         sys.exit(3)
 
-    print(f"[{datetime.now().isoformat()}] Running review...")
-    review_out = run_migration_review(original_code=migration_out["original_code"], migrated_code=migrated_code, semantic_inference=semantic_inference)
-    print(json.dumps({"review": {"analysis": review_out["review"]["analysis"]}}, indent=2, ensure_ascii=False))
-
     print(f"[{datetime.now().isoformat()}] Running test agent (may take a while)...")
-    test_out = run_equivalence_from_review_output(review_out, timeout_s=args.timeout)
+    test_out = run_equivalence(
+        original_code=migration_out["original_code"],
+        migrated_code=migrated_code,
+        timeout_s=args.timeout,
+    )
+
+    print(f"[{datetime.now().isoformat()}] Running review...")
+    review_out = run_migration_review(
+        original_code=migration_out["original_code"],
+        migrated_code=migrated_code,
+        semantic_inference=semantic_inference,
+    )
+    print(json.dumps({"review": {"analysis": review_out["review"]["analysis"]}}, indent=2, ensure_ascii=False))
 
     combined = {"migration": migration_out, "review": review_out, "test": test_out}
     (out_dir / "pipeline_output.json").write_text(json.dumps(combined, indent=2, ensure_ascii=False))
