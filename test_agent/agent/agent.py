@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -28,34 +29,40 @@ COVERAGE_THRESHOLD = 80.0
 EQUIVALENCE_THRESHOLD = 90.0
 
 llm = ChatOpenAI(
-    model="qwen/qwen3-32b",
+    model="llama-3.3-70b-versatile",
     base_url=os.getenv("PROVIDER_BASE_URL"),
     api_key=os.getenv("PROVIDER_API_KEY"),
+    max_tokens=8192,
 )
 
 # ── Paths to prompts ──────────────────────────────────────────────────────────
 
 PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
 
+
 def load_prompt(filename: str) -> str:
-    return (PROMPTS_DIR / filename).read_text()
+    return (PROMPTS_DIR / filename).read_text(encoding="utf-8")
 
 
 def clean_llm_response(raw: str) -> str:
-    """Remove <think> blocks, markdown fences e whitespace do response do LLM."""
-    import re
-    # Remove bloco <think>...</think> do Qwen3
+    """Remove <think> blocks, markdown fences and leading/trailing whitespace."""
+    # Remove <think>...</think> blocks (Qwen3 / reasoning models)
     raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
     raw = raw.strip()
-    # Remove markdown fences ```json ... ``` ou ``` ... ```
+
+    # FIX 3: handle text before the opening fence (e.g. "Here is the code:\n```python\n...")
+    fence_match = re.search(r"```(?:json|python)?\n?(.*?)```", raw, flags=re.DOTALL)
+    if fence_match:
+        return fence_match.group(1).strip()
+
+    # Fallback: strip bare fences if present at the very start
     if raw.startswith("```"):
         raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-        elif raw.startswith("python"):
-            raw = raw[6:]
-    raw = raw.strip().rstrip("```").strip()
-    return raw
+        if raw.startswith(("json", "python")):
+            raw = raw[raw.index("\n") + 1 :]
+
+    return raw.strip().rstrip("```").strip()
+
 
 # ── State ─────────────────────────────────────────────────────────────────────
 
@@ -101,14 +108,22 @@ def node_analyzer(state: AgentState) -> AgentState:
 # ── Node 2: Generator ────────────────────────────────────────────────────────
 
 def node_generator(state: AgentState) -> AgentState:
+    # FIX 2: read iteration from state; node_evaluator is responsible for
+    # incrementing it *after* this node runs, so here we always see the
+    # correct value for the current iteration.
     iteration = state.get("iteration", 0)
     print(f"[Generator] Generating tests (iteration {iteration})...")
 
     extra = ""
+    # On subsequent iterations the evaluator has already incremented the
+    # counter, so iteration > 0 is the right check.
     if iteration > 0 and state.get("evaluation"):
         instructions = state["evaluation"].get("generator_instructions", "")
         if instructions:
-            extra = f"\n\n## Additional instructions from evaluator (iteration {iteration}):\n{instructions}"
+            extra = (
+                f"\n\n## Additional instructions from evaluator"
+                f" (iteration {iteration}):\n{instructions}"
+            )
 
     prompt = load_prompt("node2_generator.txt")
     prompt = prompt.replace("{original_code}", state["original_code"])
@@ -119,7 +134,8 @@ def node_generator(state: AgentState) -> AgentState:
     response = llm.invoke([HumanMessage(content=prompt)])
     raw = clean_llm_response(response.content)
 
-    return {**state, "test_code": raw, "iteration": iteration}
+    # Do NOT increment iteration here — node_evaluator owns that counter.
+    return {**state, "test_code": raw}
 
 
 # ── Node 3: Executor ─────────────────────────────────────────────────────────
@@ -130,9 +146,10 @@ def node_executor(state: AgentState) -> AgentState:
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
 
-        (tmpdir / "original_module.py").write_text(state["original_code"])
-        (tmpdir / "migrated_module.py").write_text(state["migrated_code"])
-        (tmpdir / "test_equivalence.py").write_text(state["test_code"])
+        # FIX: explicit UTF-8 encoding to avoid cp1252 issues on Windows
+        (tmpdir / "original_module.py").write_text(state["original_code"], encoding="utf-8")
+        (tmpdir / "migrated_module.py").write_text(state["migrated_code"], encoding="utf-8")
+        (tmpdir / "test_equivalence.py").write_text(state["test_code"], encoding="utf-8")
 
         def run_pytest(extra_args: list[str]) -> str:
             result = subprocess.run(
@@ -172,26 +189,129 @@ def node_executor(state: AgentState) -> AgentState:
 
 # ── Node 4: Evaluator ────────────────────────────────────────────────────────
 
+def _parse_pytest_counts(output: str) -> dict:
+    """Extract pass/fail/error/skip counts from pytest terminal output."""
+    if not output:
+        return {"total": 0, "passed": 0, "failed": 0, "errors": 0, "skipped": 0}
+
+    def find_num(key: str) -> int:
+        m = re.search(rf"(\d+)\s+{key}", output)
+        return int(m.group(1)) if m else 0
+
+    passed = find_num("passed")
+    failed = find_num("failed")
+    errors = find_num("error(?:s)?")
+    skipped = find_num("skipped")
+    total = passed + failed + errors + skipped
+    return {
+        "total": total,
+        "passed": passed,
+        "failed": failed,
+        "errors": errors,
+        "skipped": skipped,
+    }
+
+
+def _extract_coverage_percent(output: str) -> float:
+    """
+    Extract the *total* coverage percentage from a single pytest-cov output block.
+
+    pytest-cov prints a 'TOTAL' line like:
+        TOTAL    120     18    85%
+    We look for that line first; fall back to the last percentage found.
+    """
+    if not output:
+        return 0.0
+
+    # Preferred: the TOTAL summary line produced by pytest-cov
+    total_match = re.search(r"^TOTAL\s+\d+\s+\d+\s+(\d+(?:\.\d+)?)%", output, re.MULTILINE)
+    if total_match:
+        return float(total_match.group(1))
+
+    # Fallback: last percentage figure in the block (more reliable than first)
+    all_pct = re.findall(r"(\d{1,3}(?:\.\d+)?)%", output)
+    if all_pct:
+        return float(all_pct[-1])
+
+    return 0.0
+
+
 def node_evaluator(state: AgentState) -> AgentState:
     print("[Evaluator] Evaluating results...")
 
-    prompt = load_prompt("node4_evaluator.txt")
-    prompt = prompt.replace("{pytest_output_original}", state["pytest_output_original"])
-    prompt = prompt.replace("{pytest_output_migrated}", state["pytest_output_migrated"])
-    prompt = prompt.replace("{coverage_report}", state["coverage_report"])
-    prompt = prompt.replace("{test_plan}", json.dumps(state["test_plan"], indent=2))
-    prompt = prompt.replace("{iteration_count}", str(state.get("iteration", 0)))
+    pytest_out_original = state.get("pytest_output_original", "")
+    pytest_out_migrated = state.get("pytest_output_migrated", "")
+
+    summary_orig = _parse_pytest_counts(pytest_out_original)
+    summary_mig = _parse_pytest_counts(pytest_out_migrated)
+
+    # FIX 4: extract coverage separately from each module's own output block
+    cov_orig = _extract_coverage_percent(pytest_out_original)
+    cov_mig = _extract_coverage_percent(pytest_out_migrated)
+
+    # FIX 1: pass the full raw pytest outputs so the LLM can detect which
+    # specific tests passed in one module but failed in the other
+    # (needed to compute regressions_detected accurately).
+    # FIX 5 (medium): pass the complete test_plan, not just scenario IDs.
+    compact = {
+        "pytest_original_summary": summary_orig,
+        "pytest_migrated_summary": summary_mig,
+        "pytest_original_output": pytest_out_original,
+        "pytest_migrated_output": pytest_out_migrated,
+        "coverage": {"original": cov_orig, "migrated": cov_mig},
+        "test_plan": state.get("test_plan", {}),
+        "iteration_count": state.get("iteration", 0),
+        "thresholds": {
+            "coverage": COVERAGE_THRESHOLD,
+            "equivalence": EQUIVALENCE_THRESHOLD,
+        },
+    }
+
+    # FIX 6 (medium): enforce thresholds in the prompt so the LLM uses them,
+    # and add a hard guard below that overrides the LLM if the scores are met.
+    prompt = (
+        "You are an evaluator. Given the data below, return a JSON evaluation with keys:\n"
+        "  execution_summary  (dict with passed/failed/equivalence_rate)\n"
+        "  coverage           (dict with original and migrated as floats)\n"
+        "  regressions_detected  (list of test names that passed for original but failed for migrated)\n"
+        "  scores             (dict with coverage_score, equivalence_score, overall)\n"
+        "  decision           (\"CONTINUE\" if coverage < {cov_t} OR equivalence_rate < {eq_t}, else \"FINALIZE\")\n"
+        "  missing_scenarios  (list)\n"
+        "  generator_instructions  (string with guidance for the next iteration, empty if FINALIZE)\n"
+        "  iteration_count    (integer)\n\n"
+        "Return ONLY valid JSON, no prose, no markdown.\n\n"
+        f"INPUT:\n{json.dumps(compact)}"
+    )
+    prompt = prompt.replace("{cov_t}", str(COVERAGE_THRESHOLD)).replace("{eq_t}", str(EQUIVALENCE_THRESHOLD))
 
     response = llm.invoke([HumanMessage(content=prompt)])
     raw = clean_llm_response(response.content)
 
     evaluation = json.loads(raw)
-    decision = evaluation.get("decision", "FINALIZE")
 
-    print(f"[Evaluator] Decision: {decision} | "
-          f"Coverage: {evaluation['coverage']['original_line_coverage']}% | "
-          f"Equivalence: {evaluation['execution_summary']['equivalence_rate']}%")
+    # ── Hard threshold guard (FIX 6) ─────────────────────────────────────────
+    # The LLM might miscalculate; enforce the thresholds ourselves.
+    cov_field = evaluation.get("coverage", {})
+    orig_cov = cov_field.get("original", cov_orig) if isinstance(cov_field, dict) else cov_orig
 
+    exec_field = evaluation.get("execution_summary", {})
+    equiv = (
+        exec_field.get("equivalence_rate", 0.0)
+        if isinstance(exec_field, dict)
+        else 0.0
+    )
+
+    meets_thresholds = orig_cov >= COVERAGE_THRESHOLD and equiv >= EQUIVALENCE_THRESHOLD
+    decision = "FINALIZE" if meets_thresholds else evaluation.get("decision", "FINALIZE")
+
+    print(
+        f"[Evaluator] Decision: {decision} | "
+        f"Coverage: {orig_cov:.1f}% (threshold {COVERAGE_THRESHOLD}%) | "
+        f"Equivalence: {equiv:.1f}% (threshold {EQUIVALENCE_THRESHOLD}%)"
+    )
+
+    # FIX 2 (part 2): increment iteration *here*, after the generator has run,
+    # so that the generator always reads the pre-increment value.
     return {
         **state,
         "evaluation": evaluation,
@@ -281,53 +401,23 @@ def run_agent(original_code: str, migrated_code: str) -> dict:
     return final_state
 
 
-# ── Mock de entrada (temporário até integração com os outros agentes) ─────────
-
-MOCK_ORIGINAL = """
-import urllib.request
-import json
-
-def get_user(user_id: int) -> dict:
-    url = f"https://api.example.com/users/{user_id}"
-    with urllib.request.urlopen(url, timeout=10) as response:
-        return json.loads(response.read().decode())
-"""
-
-MOCK_MIGRATED = """
-import requests
-
-def get_user(user_id: int) -> dict:
-    response = requests.get(
-        f"https://api.example.com/users/{user_id}",
-        timeout=10
-    )
-    response.raise_for_status()
-    return response.json()
-"""
-
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Run equivalence test agent")
-    parser.add_argument("--original", help="Path to original (urllib) Python file")
-    parser.add_argument("--migrated", help="Path to migrated (requests) Python file")
-    parser.add_argument("--mock", action="store_true", help="Use mock input (integration not ready yet)")
+    parser.add_argument("--original", required=True, help="Path to original (urllib) Python file")
+    parser.add_argument("--migrated", required=True, help="Path to migrated (requests) Python file")
     parser.add_argument("--output", default="report.md", help="Output report path")
     args = parser.parse_args()
 
-    if args.mock:
-        original = MOCK_ORIGINAL
-        migrated = MOCK_MIGRATED
-        print("[main] Using mock input")
-    else:
-        if not args.original or not args.migrated:
-            parser.error("--original and --migrated are required when not using --mock")
-        original = Path(args.original).read_text()
-        migrated = Path(args.migrated).read_text()
+    original = Path(args.original).read_text(encoding="utf-8")
+    migrated = Path(args.migrated).read_text(encoding="utf-8")
 
     result = run_agent(original, migrated)
 
-    Path(args.output).write_text(result["report"])
+    Path(args.output).write_text(result["report"], encoding="utf-8")
     print(f"\n Report saved to {args.output}")
-    print(f"   Overall score: {result['evaluation']['scores']['overall']}")
+    overall = result.get("evaluation", {}).get("scores", {}).get("overall")
+    print(f"   Overall score: {overall if overall is not None else 'N/A'}")
