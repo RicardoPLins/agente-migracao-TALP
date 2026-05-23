@@ -213,10 +213,25 @@ MODULE QUIRKS (facts extracted directly from the source code — trust these ove
 
 Use the quirks to:
 - Mock gzip correctly if original.uses_gzip is true
-- Include the right number of prefix chars if response_strip_chars > 0
 - Only assert raises on HTTP errors if raises_on_http_error is true for that module
 - Compare generateRequestData outputs correctly based on their return types
-- Import any modules listed in missing_imports at the top of the test file
+
+MANDATORY IMPORTS — always include ALL of these at the top of the test file:
+import urllib.parse
+import urllib.error
+import urllib.request
+import gzip
+import io
+import json
+import responses
+import requests
+from unittest.mock import MagicMock, patch
+import pytest
+
+IMPORTANT — response_strip_chars:
+The strip (e.g. responseData[9:]) happens INSIDE scrapeConversation, NOT inside executeRequest.
+executeRequest returns the raw decompressed string with NO stripping applied.
+Do NOT apply [9:] to the return value of executeRequest in your tests.
 
 ORIGINAL CODE:
 {original_code}
@@ -334,7 +349,7 @@ def _validate_test_code(code: str) -> tuple[bool, str]:
 
 def _parse_pytest_json(report_path: Path) -> dict:
     empty = {"total": 0, "passed": 0, "failed": 0,
-             "errors": 0, "skipped": 0, "failed_tests": []}
+             "errors": 0, "skipped": 0, "failed_tests": [], "passed_tests": []}
     if not report_path.exists():
         return empty
     try:
@@ -344,6 +359,10 @@ def _parse_pytest_json(report_path: Path) -> dict:
             t["nodeid"] for t in data.get("tests", [])
             if t.get("outcome") in ("failed", "error")
         ]
+        passed_tests = [
+            t["nodeid"] for t in data.get("tests", [])
+            if t.get("outcome") == "passed"
+        ]
         return {
             "total":        s.get("total", 0),
             "passed":       s.get("passed", 0),
@@ -351,6 +370,7 @@ def _parse_pytest_json(report_path: Path) -> dict:
             "errors":       s.get("errors", 0),
             "skipped":      s.get("skipped", 0),
             "failed_tests": failed_tests,
+            "passed_tests": passed_tests,
         }
     except Exception as e:
         print(f"  [Executor] JSON report parse error: {e}")
@@ -489,7 +509,7 @@ def node_inspector(state: AgentState) -> AgentState:
         "behavioral_diffs": [],
     }
 
-    raw = _invoke_llm(prompt)
+    raw = _invoke_llm(llm, prompt)
     quirks = _parse_json(raw, fallback)
 
     # Ensure structure is complete
@@ -623,7 +643,15 @@ def node_evaluator(state: AgentState) -> AgentState:
 
     if state.get("generation_error"):
         evaluation = {
-            "execution_summary": {"original_passed": 0, "migrated_passed": 0, "equivalence_rate": 0.0},
+            "execution_summary": {
+                "original_passed":  0,
+                "original_failed":  0,
+                "migrated_passed":  0,
+                "migrated_failed":  0,
+                "valid_baseline":   0,
+                "regressions":      0,
+                "regression_rate":  0.0,
+            },
             "coverage": state["coverage"],
             "regressions_detected": [],
             "scores": {"overall": 0.0},
@@ -632,31 +660,65 @@ def node_evaluator(state: AgentState) -> AgentState:
         }
         return {**state, "evaluation": evaluation, "regressions": []}
 
-    total_ref    = max(orig["passed"], 1)
-    equiv        = round((mig["passed"] / total_ref) * 100, 2)
-    regressions  = [t for t in mig["failed_tests"] if t not in orig["failed_tests"]]
-    unreliable   = orig["passed"] == 0
+    # Tests that passed on original = valid baseline for comparison
+    # Tests that passed on original but failed on migrated = real regressions
+    # Tests that failed on both = noise (bad mock/generation issue), ignored
+    orig_passed_set = set(orig.get("passed_tests", []))
+    mig_failed_set  = set(mig["failed_tests"])
+    orig_failed_set = set(orig["failed_tests"])
+
+    # Regressions: passed on original, failed on migrated
+    regressions = [t for t in mig_failed_set if t not in orig_failed_set]
+
+    # Symmetric failures: failed on both — generation noise, not regressions
+    symmetric_failures = [t for t in mig_failed_set if t in orig_failed_set]
+
+    valid_baseline = orig["passed"]  # tests that passed on original
+    regression_count = len(regressions)
+
+    # Regression rate: of tests that passed on original, how many regressed?
+    if valid_baseline > 0:
+        regression_rate = round((regression_count / valid_baseline) * 100, 2)
+        equiv = round(((valid_baseline - regression_count) / valid_baseline) * 100, 2)
+    else:
+        regression_rate = 0.0
+        equiv = 0.0
+
+    unreliable = valid_baseline == 0
 
     if unreliable:
-        print("[Evaluator] WARNING: 0 tests passed on original — results unreliable")
+        print("[Evaluator] WARNING: 0 tests passed on original — no valid baseline for comparison")
 
-    status = "PASS" if equiv >= EQUIVALENCE_THRESHOLD else "FAIL"
+    status = "PASS" if (equiv >= EQUIVALENCE_THRESHOLD and not unreliable) else "FAIL"
 
     evaluation = {
         "execution_summary": {
-            "original_passed": orig["passed"],
+            "original_passed":  orig["passed"],
+            "original_failed":  orig["failed"],
             "migrated_passed":  mig["passed"],
+            "migrated_failed":  mig["failed"],
+            "valid_baseline":   valid_baseline,
+            "regressions":      regression_count,
+            "symmetric_failures": len(symmetric_failures),
+            "regression_rate":  regression_rate,
             "equivalence_rate": equiv,
         },
-        "coverage":            state["coverage"],
-        "regressions_detected": regressions,
-        "scores":              {"overall": equiv},
-        "status":              status,
-        "unreliable_results":  unreliable,
+        "coverage": {
+            "original": state["coverage"].get("original", 0.0),
+            "migrated": state["coverage"].get("migrated", 0.0),
+        },
+        "regressions_detected":   regressions,
+        "symmetric_failures":     symmetric_failures,
+        "scores":                 {"overall": equiv},
+        "status":                 status,
+        "unreliable_results":     unreliable,
     }
 
-    print(f"[Evaluator] equiv={equiv:.1f}% status={status}"
-          + (" (UNRELIABLE)" if unreliable else ""))
+    print(
+        f"[Evaluator] baseline={valid_baseline} regressions={regression_count} "
+        f"symmetric_noise={len(symmetric_failures)} equiv={equiv:.1f}% status={status}"
+        + (" (UNRELIABLE — no baseline)" if unreliable else "")
+    )
 
     return {**state, "evaluation": evaluation, "regressions": regressions}
 
