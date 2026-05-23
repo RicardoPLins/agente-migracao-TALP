@@ -1,0 +1,38 @@
+{
+  "intencao_principal": "Scraper de conversas do Facebook",
+  "resumo_comportamento": "O código é um scraper que recupera, manipula e armazena todas as mensagens pertencentes a uma conversa específica no Facebook.",
+  "entradas": [
+    "ConversaID",
+    "Tamanho da chunk",
+    "Offset",
+    "Cookie",
+    "Fb_dtsg",
+    "UserID",
+    "Diretório de saída"
+  ],
+  "saidas": [
+    "Arquivo JSON com as mensagens da conversa"
+  ],
+  "efeitos_colaterais": [
+    "Geração de arquivos JSON para cada chunk de mensagens; geração de um arquivo JSON final com todas as mensagens"
+  ],
+  "dependencias_externas": [
+    "urllib.parse",
+    "urllib.request",
+    "gzip",
+    "os",
+    "json",
+    "sys",
+    "time",
+    "io",
+    "argparse",
+    "configparser",
+    "logging"
+  ],
+  "riscos_migracao": [
+    "Risco de perda de dados se o scraper não for configurado corretamente; risco de sobrecarga do sistema se o scraper for executado em um ambiente com recursos limitados"
+  ],
+  "regras_preservacao": [
+    "Preservar a integridade dos dados recupetados; preservar a estrutura da conversa original"
+  ]
+}

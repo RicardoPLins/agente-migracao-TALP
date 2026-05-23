@@ -15,7 +15,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import TypedDict
-
+import importlib.util
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
@@ -30,12 +30,14 @@ LLM_RETRY_ATTEMPTS = 3
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
 
+
 llm = ChatOpenAI(
     api_key=os.getenv("PROVIDER_API_KEY"),
     base_url=os.getenv("PROVIDER_BASE_URL"),
     model="llama-3.3-70b-versatile",
     temperature=0.0,
     max_tokens=4096,
+
 )
 
 # ── Prompts embutidos ─────────────────────────────────────────────────────────
@@ -561,9 +563,31 @@ def node_generator(state: AgentState) -> AgentState:
 
 def node_executor(state: AgentState) -> AgentState:
     print("[Executor] Running tests...")
+    # Check that pytest is available
+    if importlib.util.find_spec("pytest") is None:
+        msg = (
+            "pytest is not installed in the current environment.\n"
+            "Please install test dependencies, e.g.:\n"
+            "  pip install pytest pytest-cov\n"
+            "or\n"
+            "  pip install -r requirements.txt\n"
+        )
+        print("[Executor] ", msg)
+        pytest_out_original = "ERROR: pytest not installed\n" + msg
+        pytest_out_migrated = pytest_out_original
+        coverage_report = pytest_out_original
+        return {
+            **state,
+            "pytest_output_original": pytest_out_original,
+            "pytest_output_migrated": pytest_out_migrated,
+            "coverage_report": coverage_report,
+        }
+
 
     empty_summary = {"total": 0, "passed": 0, "failed": 0,
                      "errors": 0, "skipped": 0, "failed_tests": []}
+
+
 
     if state.get("generation_error"):
         print("[Executor] Skipping — generation error")

@@ -1,0 +1,14 @@
+langchain==0.1.13
+langchain-core==0.1.33
+langchain-anthropic==0.1.12
+langgraph==0.0.64
+langchain-openai==0.1.5
+langchain-groq==0.1.9
+langchain-ollama==0.1.0
+openpyxl==3.10.10
+requests==2.31.0
+python-dotenv==1.0.0
+fastapi==0.115.0
+uvicorn==0.30.6
+pytest==7.4.2
+pytest-cov==4.1.0
