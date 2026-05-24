@@ -1,19 +1,19 @@
-# Migration Test Report - 2026-05-21T10:37:26.673231
-## Decision and Score
-Decision: **FINALIZE**  
-Overall Score: **100.0**
+# Equivalence Test Report
+**Generated:** 2026-05-23T15:34:59.898700
 
-## Key Metrics
-- **Coverage**: 100.0%
-- **Equivalence Rate**: 100.0%
+## Decision: APPROVED
+The equivalence test has been approved due to an equivalence rate of 100%.
+
+## Metrics
+| Metric | Value |
+|---|---|
+| Equivalence rate | 100% |
+| Coverage (original) | 46.28% |
+| Coverage (migrated) | 39.34% |
+| Overall score | 10/10 |
 
 ## Regressions
-No regressions detected.
+None detected
 
-## Missing Scenarios / Next Actions
-No missing scenarios or next actions.
-
-## Rerun Tests
-To rerun tests, use the following command:  
-`python -m unittest discover -s tests -p 'test_*.py'`  
-Note: This command is a general example and may need to be adjusted based on your specific test setup.
+## Warnings
+None detected
