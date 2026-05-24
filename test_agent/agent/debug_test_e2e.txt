@@ -1,0 +1,22 @@
+============================= test session starts =============================
+collecting ... collected 3 items
+
+test_e2e.py::test_e2e_original PASSED                                    [ 33%]
+test_e2e.py::test_e2e_migrated PASSED                                    [ 66%]
+test_e2e.py::test_e2e_equivalence PASSED                                 [100%]
+
+============================== warnings summary ===============================
+test_e2e.py::test_e2e_original
+  C:\Users\Fernanda\OneDrive\Documentos\agente-migracao-TALP\test_agent\agent\.venv\Lib\site-packages\_pytest\python.py:170: PytestReturnNotNoneWarning: Test functions should return None, but test_e2e.py::test_e2e_original returned <class 'list'>.
+  Did you mean to use `assert` instead of `return`?
+  See https://docs.pytest.org/en/stable/how-to/assert.html#return-not-none for more information.
+    warnings.warn(
+
+test_e2e.py::test_e2e_migrated
+  C:\Users\Fernanda\OneDrive\Documentos\agente-migracao-TALP\test_agent\agent\.venv\Lib\site-packages\_pytest\python.py:170: PytestReturnNotNoneWarning: Test functions should return None, but test_e2e.py::test_e2e_migrated returned <class 'list'>.
+  Did you mean to use `assert` instead of `return`?
+  See https://docs.pytest.org/en/stable/how-to/assert.html#return-not-none for more information.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================= 3 passed, 2 warnings in 40.81s ========================
