@@ -25,6 +25,7 @@ from typing import Literal, TypedDict
 from fastapi import FastAPI, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_groq import ChatGroq
+from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 from pydantic import BaseModel
@@ -73,9 +74,13 @@ def _strip_md_fences(text: str) -> str:
 
 
 def _get_llm() -> ChatGroq:
-    api_key = os.getenv("GROQ_API_KEY")
+    # return ChatOllama(
+    #         model="llama3",
+    #         temperature=0
+    #     )
+    api_key = os.getenv("API_3")
     if not api_key:
-        raise ValueError("GROQ_API_KEY não encontrada nas variáveis de ambiente.")
+        raise ValueError("API_3 não encontrada nas variáveis de ambiente.")
     return ChatGroq(
         api_key=api_key,
         model_name="llama-3.3-70b-versatile",
