@@ -19,6 +19,8 @@ from typing import TypedDict
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
+from langchain_ollama import ChatOllama
+from langchain_groq import ChatGroq
 from langgraph.graph import END, StateGraph
 
 load_dotenv()
@@ -30,13 +32,23 @@ LLM_RETRY_ATTEMPTS = 3
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
 
-llm = ChatOpenAI(
-    api_key=os.getenv("PROVIDER_API_KEY"),
-    base_url=os.getenv("PROVIDER_BASE_URL"),
-    model="llama-3.3-70b-versatile",
-    temperature=0.0,
-    max_tokens=4096,
-)
+# llm = ChatOpenAI(
+#     api_key=os.getenv("PROVIDER_API_KEY"),
+#     base_url=os.getenv("PROVIDER_BASE_URL"),
+#     model="llama-3.3-70b-versatile",
+#     temperature=0.0,
+#     max_tokens=4096,
+# )
+
+# llm = ChatOllama(
+#             model="llama3",
+#             temperature=0
+#         )
+llm= ChatGroq(
+        api_key = os.getenv("API_2"),
+        model_name="llama-3.3-70b-versatile",
+        temperature=0.0
+        ) 
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
