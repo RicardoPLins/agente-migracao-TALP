@@ -1,6 +1,6 @@
 """
 Optimized Test Equivalence Agent
-Flow: Analyzer → Generator → Executor → Evaluator → Report
+Flow: Analyzer → Inspector → Generator → Executor → Evaluator → Report
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import TypedDict
-import importlib.util
+
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
@@ -30,17 +30,15 @@ LLM_RETRY_ATTEMPTS = 3
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
 
-
 llm = ChatOpenAI(
     api_key=os.getenv("PROVIDER_API_KEY"),
     base_url=os.getenv("PROVIDER_BASE_URL"),
     model="llama-3.3-70b-versatile",
     temperature=0.0,
     max_tokens=4096,
-
 )
 
-# ── Prompts embutidos ─────────────────────────────────────────────────────────
+# ── Prompts ───────────────────────────────────────────────────────────────────
 
 PROMPT_ANALYZER = """
 You are an analyzer. Receive two Python modules: ORIGINAL (urllib) and MIGRATED (requests).
@@ -62,7 +60,6 @@ ORIGINAL:
 MIGRATED:
 {migrated_code}
 """.strip()
-
 
 PROMPT_INSPECTOR = """
 You are a code inspector. Analyze the two Python modules below and answer specific questions about their implementation.
@@ -119,7 +116,7 @@ RULE #2 — urllib SPECIFICS (original_module)
 
 A) urllib responses are gzip-compressed.
    The original module does: gzip.GzipFile(fileobj=response).read()
-   This means the mock object itself is used as a file-like object by GzipFile.
+   The mock object itself is used as a file-like object by GzipFile.
    You MUST wrap the compressed bytes in io.BytesIO and make the mock delegate to it:
 
    import gzip, io, json
@@ -143,18 +140,21 @@ A) urllib responses are gzip-compressed.
    DO NOT use mock_resp.read.return_value = compressed — GzipFile needs a real
    file-like object whose .read() is called multiple times during decompression.
 
-B) urllib responses have leading characters stripped before JSON parse.
-   Look at the source code for the slice (e.g. responseData[9:]).
-   The mock return value of executeRequest MUST include that many prefix chars:
+B) The response_strip_chars slice (e.g. responseData[9:]) happens INSIDE
+   scrapeConversation, NOT inside executeRequest.
+   executeRequest returns the raw decompressed string — do NOT apply any slice
+   to the return value of executeRequest in your tests.
+   When mocking executeRequest for scrapeConversation tests, the mock return value
+   MUST include the prefix so the internal slice produces valid JSON:
 
-   PREFIX = "X" * 9   # adjust length to match the actual slice in the source
+   PREFIX = "X" * 9   # must match response_strip_chars from module_quirks
    mock_scraper.executeRequest = MagicMock(
        return_value=PREFIX + json.dumps(PAYLOAD)
    )
 
 C) urllib errors:
-   - Network error:  side_effect=urllib.error.URLError("reason")
-   - HTTP error:     side_effect=urllib.error.HTTPError(url, code, msg, {}, None)
+   - Network error: side_effect=urllib.error.URLError("reason")
+   - HTTP error:    side_effect=urllib.error.HTTPError(url, code, msg, {}, None)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RULE #3 — requests SPECIFICS (migrated_module)
@@ -176,19 +176,19 @@ B) requests responses have NO leading characters to strip.
    Mock body is plain JSON — no prefix needed.
 
 C) requests errors:
-   - Network error:  side_effect=requests.exceptions.ConnectionError()
-   - Timeout:        side_effect=requests.exceptions.Timeout()
-   - HTTP error:     responses.add(..., status=404) then r.raise_for_status()
+   - Network error: side_effect=requests.exceptions.ConnectionError()
+   - Timeout:       side_effect=requests.exceptions.Timeout()
+   - HTTP error:    responses.add(..., status=404) — only raises if raise_for_status() is called
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RULE #4 — WHAT TO TEST
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Good candidates (test these):
-  - generateRequestData / similar pure methods — no mocking needed
+  - generateRequestData — pure method, no mocking needed
     NOTE: original returns bytes (urlencode+encode), migrated returns dict.
-    Do NOT assert original == migrated directly — assert both contain the same keys/values.
-    Example: parse the original bytes with urllib.parse.parse_qs and compare to migrated dict.
+    Do NOT assert original == migrated directly.
+    Parse original bytes with urllib.parse.parse_qs then compare values to migrated dict.
   - executeRequest — mock the HTTP layer as shown above
   - __init__ attribute checks
 
@@ -205,7 +205,24 @@ Read them carefully and instantiate each one with its own correct arguments.
 Do NOT assume they share the same constructor.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RULE #6 — OUTPUT FORMAT
+RULE #6 — MANDATORY IMPORTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Always include ALL of these at the top of the test file:
+
+import urllib.parse
+import urllib.error
+import urllib.request
+import gzip
+import io
+import json
+import responses
+import requests
+from unittest.mock import MagicMock, patch
+import pytest
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULE #7 — OUTPUT FORMAT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Output ONLY valid Python code. No markdown fences, no explanations, no TODO comments.
@@ -215,10 +232,8 @@ MODULE QUIRKS (facts extracted directly from the source code — trust these ove
 
 Use the quirks to:
 - Mock gzip correctly if original.uses_gzip is true
-- Include the right number of prefix chars if response_strip_chars > 0
 - Only assert raises on HTTP errors if raises_on_http_error is true for that module
 - Compare generateRequestData outputs correctly based on their return types
-- Import any modules listed in missing_imports at the top of the test file
 
 ORIGINAL CODE:
 {original_code}
@@ -244,19 +259,24 @@ Structure:
 | Metric | Value |
 |---|---|
 | Equivalence rate | N% |
+| Valid baseline (tests passing on original) | N |
+| Regressions detected | N |
+| Symmetric failures (generation noise) | N |
 | Coverage (original) | N% |
 | Coverage (migrated) | N% |
-| Overall score | N/10 |
 
 ## Regressions
-[list or "None detected"]
+[list test names or "None detected"]
+
+## Symmetric Failures (ignored in scoring)
+[list test names or "None"]
 
 ## Warnings
-[generation errors or unreliable results if any]
+[unreliable results, generation errors, or "None"]
 
 Rules:
-- APPROVED if equivalence_rate >= 95%
-- CONDITIONAL if equivalence_rate >= 85%
+- APPROVED if equivalence_rate >= 95% and valid_baseline > 0
+- CONDITIONAL if equivalence_rate >= 85% and valid_baseline > 0
 - REJECTED otherwise
 - Output ONLY Markdown
 
@@ -269,7 +289,6 @@ TIMESTAMP: {timestamp}
 # ── Utils ─────────────────────────────────────────────────────────────────────
 
 def clean_llm_response(raw: str) -> str:
-    """Remove <think> blocks e markdown fences."""
     raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
     fence = re.search(r"```(?:json|python|markdown)?\n?(.*?)```", raw, flags=re.DOTALL)
     if fence:
@@ -306,23 +325,14 @@ def _validate_test_code(code: str) -> tuple[bool, str]:
     except SyntaxError as e:
         return False, f"SyntaxError: {e}"
 
-    # Verifica se há mock de rede — obrigatório
-    has_urllib_mock = bool(re.search(r"patch\s*\(.*urlopen", code))
-    has_requests_mock = bool(re.search(r"responses\.(activate|add)|@responses", code))
     has_any_mock = bool(re.search(r"MagicMock|patch\(|@patch|responses\.", code))
-
     if not has_any_mock:
         return False, "No mocking found — tests would make real HTTP requests"
 
-    # Verifica se há testes que fazem request real sem mock (padrão perigoso)
-    # Detecta chamadas a executeRequest ou scrapeConversation sem patch/responses
-    dangerous_calls = re.findall(r"def (test_\w+)", code)
-    for test_name in dangerous_calls:
-        # Extrai o corpo do teste
+    for test_name in re.findall(r"def (test_\w+)", code):
         match = re.search(
             rf"def {re.escape(test_name)}\([^)]*\):(.*?)(?=\ndef |\Z)",
-            code,
-            re.DOTALL,
+            code, re.DOTALL,
         )
         if match:
             body = match.group(1)
@@ -335,17 +345,19 @@ def _validate_test_code(code: str) -> tuple[bool, str]:
 
 
 def _parse_pytest_json(report_path: Path) -> dict:
-    empty = {"total": 0, "passed": 0, "failed": 0,
-             "errors": 0, "skipped": 0, "failed_tests": []}
+    empty = {
+        "total": 0, "passed": 0, "failed": 0,
+        "errors": 0, "skipped": 0,
+        "failed_tests": [], "passed_tests": [],
+    }
     if not report_path.exists():
         return empty
     try:
         data = json.loads(report_path.read_text(encoding="utf-8"))
         s = data.get("summary", {})
-        failed_tests = [
-            t["nodeid"] for t in data.get("tests", [])
-            if t.get("outcome") in ("failed", "error")
-        ]
+        tests = data.get("tests", [])
+        failed_tests = [t["nodeid"] for t in tests if t.get("outcome") in ("failed", "error")]
+        passed_tests = [t["nodeid"] for t in tests if t.get("outcome") == "passed"]
         return {
             "total":        s.get("total", 0),
             "passed":       s.get("passed", 0),
@@ -353,6 +365,7 @@ def _parse_pytest_json(report_path: Path) -> dict:
             "errors":       s.get("errors", 0),
             "skipped":      s.get("skipped", 0),
             "failed_tests": failed_tests,
+            "passed_tests": passed_tests,
         }
     except Exception as e:
         print(f"  [Executor] JSON report parse error: {e}")
@@ -373,43 +386,30 @@ def _parse_coverage_json(cov_path: Path) -> float:
         return 0.0
 
 
-
 def _sanitize_code(code: str) -> str:
-    """
-    Replace imports that won't resolve in the isolated tempdir.
-    Handles local imports like 'from util import logger' and relative imports.
-    """
-    # from util import logger  →  standard logging
     code = re.sub(
         r"^\s*from\s+util\s+import\s+logger.*$",
         "import logging; logger = logging.getLogger(__name__)",
-        code,
-        flags=re.MULTILINE,
+        code, flags=re.MULTILINE,
     )
-    # relative imports that break in tempdir
     code = re.sub(
         r"^\s*from\s+\.\w+\s+import\s+.*$",
         "# relative import removed for isolation",
-        code,
-        flags=re.MULTILINE,
+        code, flags=re.MULTILINE,
     )
-    # sys.path.append(...__file__...) lines
     code = re.sub(
         r"^\s*sys\.path\.append\(.*__file__.*\).*$",
         "# sys.path.append removed for isolation",
-        code,
-        flags=re.MULTILINE,
+        code, flags=re.MULTILINE,
     )
     return code
 
+
 def _run_pytest_debug(tmpdir: Path) -> str:
-    """Roda pytest com output completo para debug — salva em debug_pytest.txt."""
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", "test_equivalence.py", "-v", "--tb=long", "--no-header"],
-        cwd=tmpdir,
-        capture_output=True,
-        text=True,
-        timeout=60,
+        [sys.executable, "-m", "pytest", "test_equivalence.py",
+         "-v", "--tb=long", "--no-header"],
+        cwd=tmpdir, capture_output=True, text=True, timeout=60,
     )
     output = result.stdout + result.stderr
     debug_path = Path(__file__).parent / "debug_pytest.txt"
@@ -457,7 +457,6 @@ def node_analyzer(state: AgentState) -> AgentState:
     return {**state, "test_plan": test_plan}
 
 
-
 # ── Node 2: Inspector ─────────────────────────────────────────────────────────
 
 def node_inspector(state: AgentState) -> AgentState:
@@ -491,26 +490,22 @@ def node_inspector(state: AgentState) -> AgentState:
         "behavioral_diffs": [],
     }
 
-    raw = _invoke_llm(prompt)
-    quirks = _parse_json(raw, fallback)
+    quirks = _parse_json(_invoke_llm(prompt), fallback)
 
-    # Ensure structure is complete
     for side in ("original", "migrated"):
         if side not in quirks or not isinstance(quirks[side], dict):
             quirks[side] = fallback[side]
         for key, default in fallback["original"].items():
             quirks[side].setdefault(key, default)
+    quirks.setdefault("behavioral_diffs", [])
 
-    if "behavioral_diffs" not in quirks:
-        quirks["behavioral_diffs"] = []
-
-    print(f"[Inspector] Quirks detected:")
+    print("[Inspector] Quirks detected:")
     for side in ("original", "migrated"):
         q = quirks[side]
         print(f"  [{side}] gzip={q['uses_gzip']} strip={q['response_strip_chars']} "
               f"http_error={q['raises_on_http_error']} "
               f"generateRequestData={q['generateRequestData_return_type']}")
-    for diff in quirks.get("behavioral_diffs", []):
+    for diff in quirks["behavioral_diffs"]:
         print(f"  [diff] {diff}")
 
     return {**state, "module_quirks": quirks}
@@ -559,35 +554,16 @@ def node_generator(state: AgentState) -> AgentState:
             "generation_error": error, "generation_error_reason": reason}
 
 
-# ── Node 3: Executor ─────────────────────────────────────────────────────────
+# ── Node 4: Executor ─────────────────────────────────────────────────────────
 
 def node_executor(state: AgentState) -> AgentState:
     print("[Executor] Running tests...")
-    # Check that pytest is available
-    if importlib.util.find_spec("pytest") is None:
-        msg = (
-            "pytest is not installed in the current environment.\n"
-            "Please install test dependencies, e.g.:\n"
-            "  pip install pytest pytest-cov\n"
-            "or\n"
-            "  pip install -r requirements.txt\n"
-        )
-        print("[Executor] ", msg)
-        pytest_out_original = "ERROR: pytest not installed\n" + msg
-        pytest_out_migrated = pytest_out_original
-        coverage_report = pytest_out_original
-        return {
-            **state,
-            "pytest_output_original": pytest_out_original,
-            "pytest_output_migrated": pytest_out_migrated,
-            "coverage_report": coverage_report,
-        }
 
-
-    empty_summary = {"total": 0, "passed": 0, "failed": 0,
-                     "errors": 0, "skipped": 0, "failed_tests": []}
-
-
+    empty_summary = {
+        "total": 0, "passed": 0, "failed": 0,
+        "errors": 0, "skipped": 0,
+        "failed_tests": [], "passed_tests": [],
+    }
 
     if state.get("generation_error"):
         print("[Executor] Skipping — generation error")
@@ -599,19 +575,18 @@ def node_executor(state: AgentState) -> AgentState:
                      ("pytest-json-report", "pytest_jsonreport"),
                      ("pytest-cov", "coverage")]:
         if importlib.util.find_spec(mod) is None:
-            raise RuntimeError(f"Missing: {pkg}. Run: pip install pytest pytest-json-report pytest-cov responses")
+            raise RuntimeError(
+                f"Missing: {pkg}. Run: pip install pytest pytest-json-report pytest-cov responses"
+            )
 
     with tempfile.TemporaryDirectory() as tmp:
         d = Path(tmp)
         d.joinpath("original_module.py").write_text(_sanitize_code(state["original_code"]), encoding="utf-8")
         d.joinpath("migrated_module.py").write_text(_sanitize_code(state["migrated_code"]), encoding="utf-8")
-        d.joinpath("test_equivalence.py").write_text(state["test_code"],    encoding="utf-8")
+        d.joinpath("test_equivalence.py").write_text(state["test_code"], encoding="utf-8")
 
-        # Roda debug primeiro para capturar erros visíveis
         debug_out = _run_pytest_debug(d)
-        # Mostra primeiros 800 chars no terminal para diagnóstico rápido
-        preview = debug_out[:800].replace("\r\n", "\n")
-        print(f"  [Executor] pytest preview:\n{preview}\n  ...")
+        print(f"  [Executor] pytest preview:\n{debug_out[:800]}\n  ...")
 
         def run(module: str) -> tuple[dict, float]:
             rjson = d / f"report_{module}.json"
@@ -628,7 +603,9 @@ def node_executor(state: AgentState) -> AgentState:
         s_orig, cov_orig = run("original_module")
         s_mig,  cov_mig  = run("migrated_module")
 
-    print(f"[Executor] Done — original: {s_orig['passed']}p/{s_orig['failed']}f | migrated: {s_mig['passed']}p/{s_mig['failed']}f")
+    print(f"[Executor] Done — original: {s_orig['passed']}p/{s_orig['failed']}f "
+          f"| migrated: {s_mig['passed']}p/{s_mig['failed']}f")
+
     return {
         **state,
         "pytest_summary": {"original": {**s_orig, "coverage": cov_orig},
@@ -637,7 +614,7 @@ def node_executor(state: AgentState) -> AgentState:
     }
 
 
-# ── Node 4: Evaluator ────────────────────────────────────────────────────────
+# ── Node 5: Evaluator ────────────────────────────────────────────────────────
 
 def node_evaluator(state: AgentState) -> AgentState:
     print("[Evaluator] Evaluating...")
@@ -647,45 +624,82 @@ def node_evaluator(state: AgentState) -> AgentState:
 
     if state.get("generation_error"):
         evaluation = {
-            "execution_summary": {"original_passed": 0, "migrated_passed": 0, "equivalence_rate": 0.0},
+            "execution_summary": {
+                "original_passed": 0, "original_failed": 0,
+                "migrated_passed": 0, "migrated_failed": 0,
+                "valid_baseline": 0, "regressions": 0,
+                "symmetric_failures": 0, "regression_rate": 0.0,
+                "equivalence_rate": 0.0,
+            },
             "coverage": state["coverage"],
             "regressions_detected": [],
+            "symmetric_failures": [],
             "scores": {"overall": 0.0},
             "status": "FAIL",
             "failure_reason": state.get("generation_error_reason", "unknown"),
+            "unreliable_results": True,
         }
         return {**state, "evaluation": evaluation, "regressions": []}
 
-    total_ref    = max(orig["passed"], 1)
-    equiv        = round((mig["passed"] / total_ref) * 100, 2)
-    regressions  = [t for t in mig["failed_tests"] if t not in orig["failed_tests"]]
-    unreliable   = orig["passed"] == 0
+    orig_passed_set = set(orig.get("passed_tests", []))
+    mig_failed_set  = set(mig["failed_tests"])
+    orig_failed_set = set(orig["failed_tests"])
+
+    # Regressions: passed on original, failed on migrated → real migration issues
+    regressions = [t for t in mig_failed_set if t not in orig_failed_set]
+
+    # Symmetric failures: failed on both → generation noise, ignored in scoring
+    symmetric_failures = [t for t in mig_failed_set if t in orig_failed_set]
+
+    valid_baseline   = orig["passed"]
+    regression_count = len(regressions)
+    unreliable       = valid_baseline == 0
+
+    if valid_baseline > 0:
+        regression_rate = round((regression_count / valid_baseline) * 100, 2)
+        equiv = round(((valid_baseline - regression_count) / valid_baseline) * 100, 2)
+    else:
+        regression_rate = 0.0
+        equiv = 0.0
+
+    status = "PASS" if (equiv >= EQUIVALENCE_THRESHOLD and not unreliable) else "FAIL"
 
     if unreliable:
-        print("[Evaluator] WARNING: 0 tests passed on original — results unreliable")
-
-    status = "PASS" if equiv >= EQUIVALENCE_THRESHOLD else "FAIL"
+        print("[Evaluator] WARNING: 0 tests passed on original — no valid baseline")
 
     evaluation = {
         "execution_summary": {
-            "original_passed": orig["passed"],
-            "migrated_passed":  mig["passed"],
-            "equivalence_rate": equiv,
+            "original_passed":    orig["passed"],
+            "original_failed":    orig["failed"],
+            "migrated_passed":    mig["passed"],
+            "migrated_failed":    mig["failed"],
+            "valid_baseline":     valid_baseline,
+            "regressions":        regression_count,
+            "symmetric_failures": len(symmetric_failures),
+            "regression_rate":    regression_rate,
+            "equivalence_rate":   equiv,
         },
-        "coverage":            state["coverage"],
+        "coverage": {
+            "original": state["coverage"].get("original", 0.0),
+            "migrated": state["coverage"].get("migrated", 0.0),
+        },
         "regressions_detected": regressions,
-        "scores":              {"overall": equiv},
-        "status":              status,
-        "unreliable_results":  unreliable,
+        "symmetric_failures":   symmetric_failures,
+        "scores":               {"overall": equiv},
+        "status":               status,
+        "unreliable_results":   unreliable,
     }
 
-    print(f"[Evaluator] equiv={equiv:.1f}% status={status}"
-          + (" (UNRELIABLE)" if unreliable else ""))
+    print(
+        f"[Evaluator] baseline={valid_baseline} regressions={regression_count} "
+        f"noise={len(symmetric_failures)} equiv={equiv:.1f}% status={status}"
+        + (" (UNRELIABLE)" if unreliable else "")
+    )
 
     return {**state, "evaluation": evaluation, "regressions": regressions}
 
 
-# ── Node 5: Report ───────────────────────────────────────────────────────────
+# ── Node 6: Report ───────────────────────────────────────────────────────────
 
 def node_report(state: AgentState) -> AgentState:
     print("[Report] Generating report...")
@@ -772,8 +786,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run equivalence test agent")
     parser.add_argument("--original", help="Path to original (urllib) Python file")
     parser.add_argument("--migrated", help="Path to migrated (requests) Python file")
-    parser.add_argument("--mock",   action="store_true", help="Use mock input")
-    parser.add_argument("--output", default="report.md")
+    parser.add_argument("--mock",     action="store_true", help="Use built-in mock input")
+    parser.add_argument("--output",   default="report.md")
     args = parser.parse_args()
 
     if args.mock:
@@ -787,11 +801,18 @@ if __name__ == "__main__":
 
     result = run_agent(original, migrated)
     Path(args.output).write_text(result["report"], encoding="utf-8")
+
     print(f"\n✅ Report saved to {args.output}")
     ev = result.get("evaluation", {})
-    print(f"   Status: {ev.get('status', 'N/A')}")
-    print(f"   Equivalence: {ev.get('execution_summary', {}).get('equivalence_rate', 'N/A')}%")
+    es = ev.get("execution_summary", {})
+    print(f"   Status:            {ev.get('status', 'N/A')}")
+    print(f"   Equivalence:       {es.get('equivalence_rate', 'N/A')}%")
+    print(f"   Valid baseline:    {es.get('valid_baseline', 'N/A')} tests")
+    print(f"   Regressions:       {es.get('regressions', 'N/A')}")
+    print(f"   Symmetric noise:   {es.get('symmetric_failures', 'N/A')}")
+    print(f"   Coverage original: {ev.get('coverage', {}).get('original', 'N/A')}%")
+    print(f"   Coverage migrated: {ev.get('coverage', {}).get('migrated', 'N/A')}%")
     if result.get("generation_error"):
         print(f"   ⚠️  Generation error: {result.get('generation_error_reason')}")
     if ev.get("unreliable_results"):
-        print("   ⚠️  Results unreliable: 0 tests passed on original module")
+        print("   ⚠️  Results unreliable: no valid baseline (0 tests passed on original)")
