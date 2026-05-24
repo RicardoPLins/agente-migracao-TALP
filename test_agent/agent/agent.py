@@ -256,12 +256,13 @@ Structure:
 [1 sentence summary]
 
 ## Metrics
-| Metric | Value |
+| Métrica | Valor |
 |---|---|
+| Testes que passaram no original | N |
+| Testes que passaram nos dois | N |
+| Testes que passaram no original mas falharam no migrado | N |
+| Testes que falharam nos dois | N |
 | Equivalence rate | N% |
-| Valid baseline (tests passing on original) | N |
-| Regressions detected | N |
-| Symmetric failures (generation noise) | N |
 | Coverage (original) | N% |
 | Coverage (migrated) | N% |
 
@@ -279,6 +280,15 @@ Rules:
 - CONDITIONAL if equivalence_rate >= 85% and valid_baseline > 0
 - REJECTED otherwise
 - Output ONLY Markdown
+
+Fill the Metrics table using the values from EVALUATION below:
+- "Testes que passaram no original"                          → valid_baseline
+- "Testes que passaram nos dois"                             → passed_both
+- "Testes que passaram no original mas falharam no migrado"  → regressions
+- "Testes que falharam nos dois"                             → symmetric_failures
+- "Equivalence rate"                                         → equivalence_rate
+- "Coverage (original)"                                      → coverage.original
+- "Coverage (migrated)"                                      → coverage.migrated
 
 EVALUATION:
 {final_evaluation}
@@ -625,31 +635,40 @@ def node_evaluator(state: AgentState) -> AgentState:
     if state.get("generation_error"):
         evaluation = {
             "execution_summary": {
-                "original_passed": 0, "original_failed": 0,
-                "migrated_passed": 0, "migrated_failed": 0,
-                "valid_baseline": 0, "regressions": 0,
-                "symmetric_failures": 0, "regression_rate": 0.0,
-                "equivalence_rate": 0.0,
+                "original_passed":    0,
+                "original_failed":    0,
+                "migrated_passed":    0,
+                "migrated_failed":    0,
+                "valid_baseline":     0,
+                "passed_both":        0,
+                "regressions":        0,
+                "symmetric_failures": 0,
+                "regression_rate":    0.0,
+                "equivalence_rate":   0.0,
             },
             "coverage": state["coverage"],
-            "regressions_detected": [],
-            "symmetric_failures": [],
-            "scores": {"overall": 0.0},
-            "status": "FAIL",
-            "failure_reason": state.get("generation_error_reason", "unknown"),
-            "unreliable_results": True,
+            "regressions_detected":  [],
+            "symmetric_failures":    [],
+            "scores":                {"overall": 0.0},
+            "status":                "FAIL",
+            "failure_reason":        state.get("generation_error_reason", "unknown"),
+            "unreliable_results":    True,
         }
         return {**state, "evaluation": evaluation, "regressions": []}
 
     orig_passed_set = set(orig.get("passed_tests", []))
+    mig_passed_set  = set(mig.get("passed_tests", []))
     mig_failed_set  = set(mig["failed_tests"])
     orig_failed_set = set(orig["failed_tests"])
 
-    # Regressions: passed on original, failed on migrated → real migration issues
+    # Passed on original but failed on migrated → real regressions
     regressions = [t for t in mig_failed_set if t not in orig_failed_set]
 
-    # Symmetric failures: failed on both → generation noise, ignored in scoring
+    # Failed on both → generation noise, ignored in scoring
     symmetric_failures = [t for t in mig_failed_set if t in orig_failed_set]
+
+    # Passed on both → confirmed equivalent behaviour
+    passed_both = len(orig_passed_set & mig_passed_set)
 
     valid_baseline   = orig["passed"]
     regression_count = len(regressions)
@@ -674,6 +693,7 @@ def node_evaluator(state: AgentState) -> AgentState:
             "migrated_passed":    mig["passed"],
             "migrated_failed":    mig["failed"],
             "valid_baseline":     valid_baseline,
+            "passed_both":        passed_both,
             "regressions":        regression_count,
             "symmetric_failures": len(symmetric_failures),
             "regression_rate":    regression_rate,
@@ -691,8 +711,9 @@ def node_evaluator(state: AgentState) -> AgentState:
     }
 
     print(
-        f"[Evaluator] baseline={valid_baseline} regressions={regression_count} "
-        f"noise={len(symmetric_failures)} equiv={equiv:.1f}% status={status}"
+        f"[Evaluator] baseline={valid_baseline} passed_both={passed_both} "
+        f"regressions={regression_count} noise={len(symmetric_failures)} "
+        f"equiv={equiv:.1f}% status={status}"
         + (" (UNRELIABLE)" if unreliable else "")
     )
 
@@ -758,6 +779,11 @@ def run_agent(original_code: str, migrated_code: str) -> dict:
     })
 
 
+def run_equivalence(original_code: str, migrated_code: str, timeout_s: int = 300) -> dict:
+    """Wrapper chamado pelo orquestrador."""
+    return run_agent(original_code, migrated_code)
+
+
 # ── Mock de entrada ───────────────────────────────────────────────────────────
 
 MOCK_ORIGINAL = """
@@ -779,6 +805,34 @@ def get_user(user_id: int) -> dict:
 """
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
+
+def _print_summary(result: dict) -> None:
+    ev = result.get("evaluation", {})
+    es = ev.get("execution_summary", {})
+    cov = ev.get("coverage", {})
+
+    W = 55
+    COL = 44
+
+    print(f"\n{'─' * W}")
+    print(f"  {'Métrica':<{COL}} Valor")
+    print(f"{'─' * W}")
+    print(f"  {'Testes que passaram no original':<{COL}} {es.get('valid_baseline', 0)}")
+    print(f"  {'Testes que passaram nos dois':<{COL}} {es.get('passed_both', 0)}")
+    print(f"  {'Passaram no original, falharam no migrado':<{COL}} {es.get('regressions', 0)}")
+    print(f"  {'Testes que falharam nos dois':<{COL}} {es.get('symmetric_failures', 0)}")
+    print(f"{'─' * W}")
+    print(f"  {'Equivalence rate':<{COL}} {es.get('equivalence_rate', 0)}%")
+    print(f"  {'Coverage original':<{COL}} {cov.get('original', 0)}%")
+    print(f"  {'Coverage migrated':<{COL}} {cov.get('migrated', 0)}%")
+    print(f"  {'Status':<{COL}} {ev.get('status', 'N/A')}")
+    print(f"{'─' * W}")
+
+    if result.get("generation_error"):
+        print(f"  ⚠️  Generation error: {result.get('generation_error_reason')}")
+    if ev.get("unreliable_results"):
+        print("  ⚠️  Sem baseline válido: 0 testes passaram no original")
+
 
 if __name__ == "__main__":
     import argparse
@@ -803,16 +857,4 @@ if __name__ == "__main__":
     Path(args.output).write_text(result["report"], encoding="utf-8")
 
     print(f"\n✅ Report saved to {args.output}")
-    ev = result.get("evaluation", {})
-    es = ev.get("execution_summary", {})
-    print(f"   Status:            {ev.get('status', 'N/A')}")
-    print(f"   Equivalence:       {es.get('equivalence_rate', 'N/A')}%")
-    print(f"   Valid baseline:    {es.get('valid_baseline', 'N/A')} tests")
-    print(f"   Regressions:       {es.get('regressions', 'N/A')}")
-    print(f"   Symmetric noise:   {es.get('symmetric_failures', 'N/A')}")
-    print(f"   Coverage original: {ev.get('coverage', {}).get('original', 'N/A')}%")
-    print(f"   Coverage migrated: {ev.get('coverage', {}).get('migrated', 'N/A')}%")
-    if result.get("generation_error"):
-        print(f"   ⚠️  Generation error: {result.get('generation_error_reason')}")
-    if ev.get("unreliable_results"):
-        print("   ⚠️  Results unreliable: no valid baseline (0 tests passed on original)")
+    _print_summary(result)
