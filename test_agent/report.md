@@ -1,24 +1,27 @@
 # Equivalence Test Report
-**Generated:** 2026-05-24T12:21:30.375822
+**Generated:** 2026-05-24T17:27:39.002292
 
-## Decision: REJECTED
-The equivalence test report is rejected due to an empty test code and zero valid baseline.
+## Decision: APPROVED
+The equivalence test has been approved with a 100% equivalence rate and 6 valid baseline tests passing.
 
 ## Metrics
 | Metric | Value |
 |---|---|
-| Equivalence rate | 0% |
-| Valid baseline (tests passing on original) | 0 |
+| Equivalence rate | 100% |
+| Valid baseline (tests passing on original) | 6 |
 | Regressions detected | 0 |
-| Symmetric failures (generation noise) | 0 |
-| Coverage (original) | 0% |
-| Coverage (migrated) | 0% |
+| Symmetric failures (generation noise) | 4 |
+| Coverage (original) | 37.19% |
+| Coverage (migrated) | 29.51% |
 
 ## Regressions
 None detected
 
 ## Symmetric Failures (ignored in scoring)
-None
+* test_equivalence.py::test_init_migrated
+* test_equivalence.py::test_executeRequest_migrated_http_error
+* test_equivalence.py::test_generateRequestData_original
+* test_equivalence.py::test_executeRequest_migrated
 
 ## Warnings
-Unreliable results due to empty test code and generation errors.
+None

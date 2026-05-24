@@ -220,6 +220,11 @@ import responses
 import requests
 from unittest.mock import MagicMock, patch
 import pytest
+from original_module import ConversationScraper as OriginalConversationScraper
+from migrated_module import ConversationScraper as MigratedConversationScraper
+
+CRITICAL: ALWAYS use OriginalConversationScraper and MigratedConversationScraper.
+NEVER use bare ConversationScraper — it is not defined and will cause NameError.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RULE #7 — OUTPUT FORMAT
@@ -256,13 +261,12 @@ Structure:
 [1 sentence summary]
 
 ## Metrics
-| Métrica | Valor |
+| Metric | Value |
 |---|---|
-| Testes que passaram no original | N |
-| Testes que passaram nos dois | N |
-| Testes que passaram no original mas falharam no migrado | N |
-| Testes que falharam nos dois | N |
 | Equivalence rate | N% |
+| Valid baseline (tests passing on original) | N |
+| Regressions detected | N |
+| Symmetric failures (generation noise) | N |
 | Coverage (original) | N% |
 | Coverage (migrated) | N% |
 
@@ -281,19 +285,107 @@ Rules:
 - REJECTED otherwise
 - Output ONLY Markdown
 
-Fill the Metrics table using the values from EVALUATION below:
-- "Testes que passaram no original"                          → valid_baseline
-- "Testes que passaram nos dois"                             → passed_both
-- "Testes que passaram no original mas falharam no migrado"  → regressions
-- "Testes que falharam nos dois"                             → symmetric_failures
-- "Equivalence rate"                                         → equivalence_rate
-- "Coverage (original)"                                      → coverage.original
-- "Coverage (migrated)"                                      → coverage.migrated
-
 EVALUATION:
 {final_evaluation}
 
 TIMESTAMP: {timestamp}
+""".strip()
+
+
+PROMPT_E2E = """
+You are a Python test engineer. Generate end-to-end pytest tests that verify functional equivalence between original_module and migrated_module by testing the COMPLETE flow — not individual methods.
+
+═══════════════════════════════════════════════════════
+E2E TESTING PHILOSOPHY
+Mock ONLY the network layer (HTTP calls). Let everything else run for real:
+- generateRequestData runs for real
+- executeRequest runs for real (except the HTTP call inside)
+- scrapeConversation runs for real (filesystem, JSON parsing, etc.)
+Compare the FINAL OUTPUT (files written to disk) between original and migrated.
+═══════════════════════════════════════════════════════
+
+MANDATORY RULES:
+
+1. Use pytest tmp_path fixture for all filesystem operations.
+   Each module writes to its own subdirectory inside tmp_path.
+
+2. Mock ONLY urllib.request.urlopen for original_module.
+   Mock ONLY the HTTP layer for migrated_module using responses library.
+
+3. The mock response must be realistic — it must include all fields the code
+   actually reads (payload, actions, timestamps, end_of_history marker, etc).
+   Study the source code carefully to understand what JSON structure is expected.
+
+4. For original_module (urllib + gzip):
+   - Response must be gzip-compressed
+   - Must include the 9-char prefix that gets stripped internally
+   - Use io.BytesIO for the mock file object
+
+   Example:
+   import gzip, io, json
+   RESPONSE_DATA = {"payload": {"actions": [{"id": "1", "timestamp": "100"}]}, "end_of_history": True}
+   raw = ("X" * 9 + json.dumps(RESPONSE_DATA)).encode()
+   compressed = gzip.compress(raw)
+   buf = io.BytesIO(compressed)
+   mock_resp = MagicMock()
+   mock_resp.read.side_effect = buf.read
+   mock_resp.readable.return_value = True
+   mock_resp.seekable.return_value = False
+   mock_resp.writable.return_value = False
+   mock_resp.__enter__ = lambda s: s
+   mock_resp.__exit__ = MagicMock(return_value=False)
+
+5. For migrated_module (requests, no gzip, slice already inside executeRequest):
+   - Response body is plain JSON — no gzip, no prefix needed
+   - responses library handles the mock
+
+   Example:
+   @responses.activate
+   def test_e2e_migrated(tmp_path):
+       responses.add(responses.POST, 'https://www.facebook.com/ajax/mercury/thread_info.php',
+                     json=RESPONSE_DATA, status=200)
+
+6. After both scrapers run, read the output file and compare:
+   orig_result = json.loads((tmp_path / "orig" / convID / "conversation.json").read_text())
+   mig_result  = json.loads((tmp_path / "mig"  / convID / "conversation.json").read_text())
+   assert orig_result == mig_result
+
+7. outDir must be a STRING — the original module uses string concatenation internally.
+   Always convert tmp_path to str before passing:
+   out_dir_orig = str(tmp_path / "orig")
+   out_dir_mig  = str(tmp_path / "mig")
+
+8. For migrated_module the executeRequest already strips 9 chars internally (response.text[9:]).
+   So the responses mock body MUST include 9 prefix chars so after the strip the result is valid JSON:
+   PREFIX = "X" * 9
+   responses.add(responses.POST, 'https://...', body=PREFIX + json.dumps(RESPONSE_DATA), status=200)
+   DO NOT use json=RESPONSE_DATA for migrated mocks — use body=PREFIX+json.dumps(RESPONSE_DATA).
+
+9. MANDATORY IMPORTS at top of file:
+   import urllib.parse
+   import urllib.error
+   import urllib.request
+   import gzip
+   import io
+   import json
+   import os
+   import responses
+   import requests
+   from unittest.mock import MagicMock, patch
+   import pytest
+   from original_module import ConversationScraper as OriginalConversationScraper
+   from migrated_module import ConversationScraper as MigratedConversationScraper
+
+10. Output ONLY valid Python code. No markdown fences, no explanations.
+
+MODULE QUIRKS:
+{module_quirks}
+
+ORIGINAL CODE:
+{original_code}
+
+MIGRATED CODE:
+{migrated_code}
 """.strip()
 
 # ── Utils ─────────────────────────────────────────────────────────────────────
@@ -415,6 +507,21 @@ def _sanitize_code(code: str) -> str:
     return code
 
 
+def _run_pytest_debug_file(tmpdir: Path, filename: str = "test_equivalence.py") -> str:
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", filename,
+         "-v", "--tb=long", "--no-header"],
+        cwd=tmpdir, capture_output=True, text=True, timeout=60,
+    )
+    output = result.stdout + result.stderr
+    debug_path = Path(__file__).parent / f"debug_{filename.replace('.py', '')}.txt"
+    try:
+        debug_path.write_text(output, encoding="utf-8")
+    except Exception:
+        pass
+    return output
+
+
 def _run_pytest_debug(tmpdir: Path) -> str:
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "test_equivalence.py",
@@ -439,7 +546,9 @@ class AgentState(TypedDict):
     test_plan:               dict
     module_quirks:           dict
     test_code:               str
+    e2e_test_code:           str
     pytest_summary:          dict
+    e2e_pytest_summary:      dict
     coverage:                dict
     regressions:             list
     evaluation:              dict
@@ -524,7 +633,7 @@ def node_inspector(state: AgentState) -> AgentState:
 # ── Node 3: Generator ────────────────────────────────────────────────────────
 
 def node_generator(state: AgentState) -> AgentState:
-    print("[Generator] Generating tests...")
+    print("[Generator] Generating unit tests...")
 
     prompt = (
         PROMPT_GENERATOR
@@ -543,7 +652,7 @@ def node_generator(state: AgentState) -> AgentState:
         valid, msg = _validate_test_code(raw)
         if valid:
             test_code = raw
-            print(f"[Generator] Valid tests on attempt {attempt}")
+            print(f"[Generator] Valid unit tests on attempt {attempt}")
             try:
                 out_dir = Path(__file__).parent / "generated_tests"
                 out_dir.mkdir(parents=True, exist_ok=True)
@@ -558,9 +667,40 @@ def node_generator(state: AgentState) -> AgentState:
 
     if not test_code:
         error = True
-        print(f"[Generator] WARNING: failed after {LLM_RETRY_ATTEMPTS} attempts — {reason}")
+        print(f"[Generator] WARNING: unit tests failed after {LLM_RETRY_ATTEMPTS} attempts — {reason}")
 
-    return {**state, "test_code": test_code,
+    # ── Generate E2E tests ────────────────────────────────────────────────────
+    print("[Generator] Generating E2E tests...")
+
+    e2e_prompt = (
+        PROMPT_E2E
+        .replace("{original_code}", state["original_code"])
+        .replace("{migrated_code}", state["migrated_code"])
+        .replace("{module_quirks}", json.dumps(state.get("module_quirks", {}), indent=2))
+    )
+
+    e2e_test_code = ""
+    for attempt in range(1, LLM_RETRY_ATTEMPTS + 1):
+        raw = _invoke_llm(e2e_prompt, attempts=1)
+        valid, msg = _validate_test_code(raw)
+        if valid:
+            e2e_test_code = raw
+            print(f"[Generator] Valid E2E tests on attempt {attempt}")
+            try:
+                out_dir = Path(__file__).parent / "generated_tests"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                (out_dir / f"test_e2e_{ts}.py").write_text(e2e_test_code, encoding="utf-8")
+                print(f"[Generator] Saved to generated_tests/test_e2e_{ts}.py")
+            except Exception:
+                pass
+            break
+        print(f"  [Generator] E2E attempt {attempt} invalid: {msg}")
+
+    if not e2e_test_code:
+        print("[Generator] WARNING: E2E test generation failed — continuing with unit tests only")
+
+    return {**state, "test_code": test_code, "e2e_test_code": e2e_test_code,
             "generation_error": error, "generation_error_reason": reason}
 
 
@@ -595,7 +735,7 @@ def node_executor(state: AgentState) -> AgentState:
         d.joinpath("migrated_module.py").write_text(_sanitize_code(state["migrated_code"]), encoding="utf-8")
         d.joinpath("test_equivalence.py").write_text(state["test_code"], encoding="utf-8")
 
-        debug_out = _run_pytest_debug(d)
+        debug_out = _run_pytest_debug_file(d, "test_equivalence.py")
         print(f"  [Executor] pytest preview:\n{debug_out[:800]}\n  ...")
 
         def run(module: str) -> tuple[dict, float]:
@@ -613,13 +753,50 @@ def node_executor(state: AgentState) -> AgentState:
         s_orig, cov_orig = run("original_module")
         s_mig,  cov_mig  = run("migrated_module")
 
-    print(f"[Executor] Done — original: {s_orig['passed']}p/{s_orig['failed']}f "
+    print(f"[Executor] Unit tests done — original: {s_orig['passed']}p/{s_orig['failed']}f "
           f"| migrated: {s_mig['passed']}p/{s_mig['failed']}f")
+
+    # ── Run E2E tests ─────────────────────────────────────────────────────────
+    e2e_summary = {"original": {}, "migrated": {}}
+    if state.get("e2e_test_code"):
+        print("[Executor] Running E2E tests...")
+        with tempfile.TemporaryDirectory() as e2e_tmp:
+            e = Path(e2e_tmp)
+            e.joinpath("original_module.py").write_text(_sanitize_code(state["original_code"]), encoding="utf-8")
+            e.joinpath("migrated_module.py").write_text(_sanitize_code(state["migrated_code"]), encoding="utf-8")
+            e.joinpath("test_e2e.py").write_text(state["e2e_test_code"], encoding="utf-8")
+
+            e2e_debug = _run_pytest_debug_file(e, "test_e2e.py")
+            print(f"  [Executor] E2E preview:\n{e2e_debug[:600]}\n  ...")
+
+            def run_e2e(module: str) -> tuple[dict, float]:
+                rjson = e / f"e2e_report_{module}.json"
+                cjson = e / f"e2e_cov_{module}.json"
+                subprocess.run(
+                    [sys.executable, "-m", "pytest", "test_e2e.py",
+                     "-v", "--tb=short",
+                     "--json-report", f"--json-report-file={rjson}",
+                     f"--cov={module}", f"--cov-report=json:{cjson}"],
+                    cwd=e, capture_output=True, text=True, timeout=120,
+                )
+                return _parse_pytest_json(rjson), _parse_coverage_json(cjson)
+
+            e2e_orig, e2e_cov_orig = run_e2e("original_module")
+            e2e_mig,  e2e_cov_mig  = run_e2e("migrated_module")
+            e2e_summary = {
+                "original": {**e2e_orig, "coverage": e2e_cov_orig},
+                "migrated":  {**e2e_mig,  "coverage": e2e_cov_mig},
+            }
+            print(f"[Executor] E2E done — original: {e2e_orig['passed']}p/{e2e_orig['failed']}f "
+                  f"| migrated: {e2e_mig['passed']}p/{e2e_mig['failed']}f")
+    else:
+        print("[Executor] Skipping E2E — no E2E tests generated")
 
     return {
         **state,
         "pytest_summary": {"original": {**s_orig, "coverage": cov_orig},
                            "migrated":  {**s_mig,  "coverage": cov_mig}},
+        "e2e_pytest_summary": e2e_summary,
         "coverage": {"original": cov_orig, "migrated": cov_mig},
     }
 
@@ -635,40 +812,31 @@ def node_evaluator(state: AgentState) -> AgentState:
     if state.get("generation_error"):
         evaluation = {
             "execution_summary": {
-                "original_passed":    0,
-                "original_failed":    0,
-                "migrated_passed":    0,
-                "migrated_failed":    0,
-                "valid_baseline":     0,
-                "passed_both":        0,
-                "regressions":        0,
-                "symmetric_failures": 0,
-                "regression_rate":    0.0,
-                "equivalence_rate":   0.0,
+                "original_passed": 0, "original_failed": 0,
+                "migrated_passed": 0, "migrated_failed": 0,
+                "valid_baseline": 0, "regressions": 0,
+                "symmetric_failures": 0, "regression_rate": 0.0,
+                "equivalence_rate": 0.0,
             },
             "coverage": state["coverage"],
-            "regressions_detected":  [],
-            "symmetric_failures":    [],
-            "scores":                {"overall": 0.0},
-            "status":                "FAIL",
-            "failure_reason":        state.get("generation_error_reason", "unknown"),
-            "unreliable_results":    True,
+            "regressions_detected": [],
+            "symmetric_failures": [],
+            "scores": {"overall": 0.0},
+            "status": "FAIL",
+            "failure_reason": state.get("generation_error_reason", "unknown"),
+            "unreliable_results": True,
         }
         return {**state, "evaluation": evaluation, "regressions": []}
 
     orig_passed_set = set(orig.get("passed_tests", []))
-    mig_passed_set  = set(mig.get("passed_tests", []))
     mig_failed_set  = set(mig["failed_tests"])
     orig_failed_set = set(orig["failed_tests"])
 
-    # Passed on original but failed on migrated → real regressions
+    # Regressions: passed on original, failed on migrated → real migration issues
     regressions = [t for t in mig_failed_set if t not in orig_failed_set]
 
-    # Failed on both → generation noise, ignored in scoring
+    # Symmetric failures: failed on both → generation noise, ignored in scoring
     symmetric_failures = [t for t in mig_failed_set if t in orig_failed_set]
-
-    # Passed on both → confirmed equivalent behaviour
-    passed_both = len(orig_passed_set & mig_passed_set)
 
     valid_baseline   = orig["passed"]
     regression_count = len(regressions)
@@ -693,7 +861,6 @@ def node_evaluator(state: AgentState) -> AgentState:
             "migrated_passed":    mig["passed"],
             "migrated_failed":    mig["failed"],
             "valid_baseline":     valid_baseline,
-            "passed_both":        passed_both,
             "regressions":        regression_count,
             "symmetric_failures": len(symmetric_failures),
             "regression_rate":    regression_rate,
@@ -710,10 +877,31 @@ def node_evaluator(state: AgentState) -> AgentState:
         "unreliable_results":   unreliable,
     }
 
+    # ── E2E evaluation ───────────────────────────────────────────────────────
+    e2e_summary = state.get("e2e_pytest_summary", {})
+    e2e_orig = e2e_summary.get("original", {})
+    e2e_mig  = e2e_summary.get("migrated", {})
+    e2e_regressions = [
+        t for t in e2e_mig.get("failed_tests", [])
+        if t not in e2e_orig.get("failed_tests", [])
+    ]
+    e2e_baseline = e2e_orig.get("passed", 0)
+    e2e_equiv = round(
+        ((e2e_baseline - len(e2e_regressions)) / max(e2e_baseline, 1)) * 100, 2
+    ) if e2e_baseline > 0 else 0.0
+
+    evaluation["e2e"] = {
+        "baseline":    e2e_baseline,
+        "regressions": len(e2e_regressions),
+        "equiv":       e2e_equiv,
+        "regressions_detected": e2e_regressions,
+    }
+
     print(
-        f"[Evaluator] baseline={valid_baseline} passed_both={passed_both} "
-        f"regressions={regression_count} noise={len(symmetric_failures)} "
-        f"equiv={equiv:.1f}% status={status}"
+        f"[Evaluator] unit: baseline={valid_baseline} regressions={regression_count} "
+        f"noise={len(symmetric_failures)} equiv={equiv:.1f}% | "
+        f"e2e: baseline={e2e_baseline} regressions={len(e2e_regressions)} equiv={e2e_equiv:.1f}% | "
+        f"status={status}"
         + (" (UNRELIABLE)" if unreliable else "")
     )
 
@@ -769,7 +957,9 @@ def run_agent(original_code: str, migrated_code: str) -> dict:
         "test_plan":               {},
         "module_quirks":           {},
         "test_code":               "",
+        "e2e_test_code":           "",
         "pytest_summary":          {},
+        "e2e_pytest_summary":      {},
         "coverage":                {},
         "regressions":             [],
         "evaluation":              {},
@@ -777,11 +967,6 @@ def run_agent(original_code: str, migrated_code: str) -> dict:
         "generation_error_reason": "",
         "report":                  "",
     })
-
-
-def run_equivalence(original_code: str, migrated_code: str, timeout_s: int = 300) -> dict:
-    """Wrapper chamado pelo orquestrador."""
-    return run_agent(original_code, migrated_code)
 
 
 # ── Mock de entrada ───────────────────────────────────────────────────────────
@@ -806,34 +991,6 @@ def get_user(user_id: int) -> dict:
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
-def _print_summary(result: dict) -> None:
-    ev = result.get("evaluation", {})
-    es = ev.get("execution_summary", {})
-    cov = ev.get("coverage", {})
-
-    W = 55
-    COL = 44
-
-    print(f"\n{'─' * W}")
-    print(f"  {'Métrica':<{COL}} Valor")
-    print(f"{'─' * W}")
-    print(f"  {'Testes que passaram no original':<{COL}} {es.get('valid_baseline', 0)}")
-    print(f"  {'Testes que passaram nos dois':<{COL}} {es.get('passed_both', 0)}")
-    print(f"  {'Passaram no original, falharam no migrado':<{COL}} {es.get('regressions', 0)}")
-    print(f"  {'Testes que falharam nos dois':<{COL}} {es.get('symmetric_failures', 0)}")
-    print(f"{'─' * W}")
-    print(f"  {'Equivalence rate':<{COL}} {es.get('equivalence_rate', 0)}%")
-    print(f"  {'Coverage original':<{COL}} {cov.get('original', 0)}%")
-    print(f"  {'Coverage migrated':<{COL}} {cov.get('migrated', 0)}%")
-    print(f"  {'Status':<{COL}} {ev.get('status', 'N/A')}")
-    print(f"{'─' * W}")
-
-    if result.get("generation_error"):
-        print(f"  ⚠️  Generation error: {result.get('generation_error_reason')}")
-    if ev.get("unreliable_results"):
-        print("  ⚠️  Sem baseline válido: 0 testes passaram no original")
-
-
 if __name__ == "__main__":
     import argparse
 
@@ -857,4 +1014,21 @@ if __name__ == "__main__":
     Path(args.output).write_text(result["report"], encoding="utf-8")
 
     print(f"\n✅ Report saved to {args.output}")
-    _print_summary(result)
+    ev = result.get("evaluation", {})
+    es = ev.get("execution_summary", {})
+    print(f"   Status:            {ev.get('status', 'N/A')}")
+    print(f"   Equivalence:       {es.get('equivalence_rate', 'N/A')}%")
+    print(f"   Valid baseline:    {es.get('valid_baseline', 'N/A')} tests")
+    print(f"   Regressions:       {es.get('regressions', 'N/A')}")
+    print(f"   Symmetric noise:   {es.get('symmetric_failures', 'N/A')}")
+    print(f"   Coverage original: {ev.get('coverage', {}).get('original', 'N/A')}%")
+    print(f"   Coverage migrated: {ev.get('coverage', {}).get('migrated', 'N/A')}%")
+    if result.get("generation_error"):
+        print(f"   ⚠️  Generation error: {result.get('generation_error_reason')}")
+    e2e = ev.get("e2e", {})
+    if e2e:
+        print(f"   E2E baseline:      {e2e.get('baseline', 'N/A')} tests")
+        print(f"   E2E regressions:   {e2e.get('regressions', 'N/A')}")
+        print(f"   E2E equivalence:   {e2e.get('equiv', 'N/A')}%")
+    if ev.get("unreliable_results"):
+        print("   ⚠️  Results unreliable: no valid baseline (0 tests passed on original)")
