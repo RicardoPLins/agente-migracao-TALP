@@ -1,0 +1,25 @@
+{
+  "description": "Nó Relatório Final — consolida os achados validados em um relatório Markdown.",
+  "variables": ["achados_str", "diff_str"],
+  "template": [
+    "Você é um especialista em revisão de migrações de código.",
+    "",
+    "Com base nos achados validados abaixo, gere um Relatório de Revisão de Código em Markdown.",
+    "",
+    "O relatório deve conter obrigatoriamente:",
+    "1. **Resumo Executivo** – visão geral da qualidade da migração.",
+    "2. **Achados de Semântica** – problemas de equivalência semântica encontrados.",
+    "3. **Achados de Segurança** – riscos de segurança identificados.",
+    "4. **Achados de Lint/Style** – issues de estilo e qualidade introduzidos pela migração (via Ruff).",
+    "5. **Recomendações Prioritárias** – top 3–5 ações antes de aprovar o merge.",
+    "6. **Veredito Final** – \"APROVADO COM RESSALVAS\" ou \"REQUER CORREÇÕES ANTES DO MERGE\".",
+    "",
+    "IMPORTANTE: NÃO corrija o código. Apenas reporte e oriente o desenvolvedor.",
+    "",
+    "### ACHADOS VALIDADOS:",
+    "<<achados_str>>",
+    "",
+    "### RESUMO DO DIFF ESTRUTURADO:",
+    "<<diff_str>>"
+  ]
+}

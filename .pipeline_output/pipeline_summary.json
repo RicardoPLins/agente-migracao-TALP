@@ -1,0 +1,29 @@
+{
+  "pipeline_start": "2026-05-24T08:48:49.172523",
+  "total_elapsed_s": 210.3,
+  "input_file": "C:\\Users\\joiso\\Desktop\\agente-migracao-TALP\\url.py",
+  "stages": {
+    "migration": {
+      "status": "validado",
+      "elapsed_s": 21.35171890258789,
+      "migrated_lines": 222
+    },
+    "test": {
+      "decision": "skipped",
+      "iteration": null,
+      "elapsed_s": null,
+      "error": null
+    },
+    "review": {
+      "agentes_acionados": [
+        "semantica",
+        "seguranca",
+        "lint"
+      ],
+      "iteracoes": 1,
+      "deve_reprocessar": false,
+      "achados_total": 10,
+      "elapsed_s": 173.89656949043274
+    }
+  }
+}
