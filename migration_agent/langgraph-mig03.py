@@ -104,7 +104,9 @@ Key migration rules:
 4. READING: Replace response.read().decode('utf-8') with response.text
 5. EXCEPTIONS: Replace urllib.error exceptions with requests.exceptions
 6. POST DATA: Convert urllib requests with data parameter to requests.post()
-
+7. TIMEOUT PRESERVATION: Preserve all timeout configurations during migration.
+8. REQUEST OBJECT MIGRATION: Convert urllib.request.Request objects into requests API parameters, while preserving the original request behavior.
+9. SESSION AND COOKIE HANDLING: When urllib uses cookies, handlers, or openers: migrate to requests.Session(), preserve authentication state and cookies and preserve persistent connections whenever possible.
     Here are the real-world examples from GitHub migrations:
 
 """
@@ -123,9 +125,9 @@ Now, when you receive urllib code, migrate it following these patterns:
 2. Map each pattern to the corresponding requests equivalent
 3. Preserve the code structure and functionality
 4. Handle error cases appropriately
-5. Return ONLY the migrated Python code without any explanation
+5. Return the migrated Python code with the explanation
 
-Important: Return ONLY valid Python code, no markdown, no explanations."""
+Important: Return All valid Python code, but not include news markdown and explanations."""
     
     return prompt
 
@@ -208,9 +210,15 @@ def no_migrar_com_llm(estado: EstadoAgente, exemplos_treino: list[dict], prompt_
     
     try:
         # Use local Ollama model for migration (no rate limits, free)
-        model = ChatOllama(
-            model="llama3",
-            temperature=0
+        # model = ChatOllama(
+        #     model="llama3",
+        #     temperature=0
+        # )
+        api_key = os.getenv("GROQ_API_KEY")
+        model = ChatGroq(
+        api_key=api_key,
+        model_name="llama-3.3-70b-versatile",
+        temperature=0.0,
         )
         
         # Create messages
@@ -407,7 +415,7 @@ if __name__ == "__main__":
     
     # Read urllib code from url.py
     try:
-        url_file_path = os.path.join(os.path.dirname(__file__), "..", "url.py")
+        url_file_path = os.path.join(os.path.dirname(__file__), "..", "url-ckan.py")
         with open(url_file_path, "r") as f:
             codigo_usuario = f.read().strip()
     except FileNotFoundError:
