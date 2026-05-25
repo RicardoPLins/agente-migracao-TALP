@@ -274,15 +274,15 @@ def run_migration(codigo_original: str, num_examples: int = 10) -> dict:
     from langchain_core.messages import HumanMessage, AIMessage
 
     resultado = agente.invoke({
-        "messages": [HumanMessage(content="Migrar código urllib para requests")],
-        "codigo_usuario": codigo_original,
-        "codigo_migrado": "",
+        "messages":            [HumanMessage(content="Migrar código urllib para requests")],
+        "codigo_usuario":      codigo_original,
+        "codigo_migrado":      "",
         "inferencia_semantica": "",
-        "analise_agente": "",
-        "status": "",
+        "analise_agente":      "",
+        "status":              "",
     })
 
-    elapsed = time.time() - t0
+    elapsed        = time.time() - t0
     codigo_migrado = resultado.get("codigo_migrado", "")
     status = resultado.get("status", "unknown")
     messages_text = [
@@ -301,10 +301,10 @@ def run_migration(codigo_original: str, num_examples: int = 10) -> dict:
         sys.exit(3)
 
     return {
-        "original_code": codigo_original,
-        "migrated_code": codigo_migrado,
-        "status": status,
-        "messages": messages_text,
+        "original_code":        codigo_original,
+        "migrated_code":        codigo_migrado,
+        "status":               status,
+        "messages":             messages_text,
         "inferencia_semantica": resultado.get("inferencia_semantica", ""),
         "elapsed_s": elapsed,
         "backend": backend,
@@ -325,9 +325,10 @@ def run_test(original_code: str, migrated_code: str) -> dict:
     result = ta.run_agent(original_code, migrated_code)
     elapsed = time.time() - t0
 
-    evaluation = result.get("evaluation", {})
-    scores = evaluation.get("scores", {}) if isinstance(evaluation, dict) else {}
-    decision = result.get("decision", "unknown")
+    evaluation      = result.get("evaluation", {})
+    router_decision = result.get("router_decision", {})
+    needs_revision  = router_decision.get("needs_revision", False)
+    verdict         = "NEEDS_REVISION" if needs_revision else "APPROVED"
 
     print(f"  Decision  : {decision}")
     print(f"  Iteracoes : {result.get('iteration', 0)}")
@@ -375,12 +376,12 @@ def run_review(original_code: str, migrated_code: str, max_retries: int = 3) -> 
 
     for attempt in range(1, max_retries + 1):
         try:
-            print(f"  Executando grafo de revisão (tentativa {attempt}/{max_retries})...")
+            print(f"  Executando (tentativa {attempt}/{max_retries})...")
             result = ra._executar_grafo(original_code, migrated_code)
             break
         except Exception as exc:
             err_str = str(exc)
-            is_rate_limit = "rate_limit" in err_str.lower() or "429" in err_str
+            is_rate_limit  = "rate_limit" in err_str.lower() or "429" in err_str
             is_daily_limit = "tokens per day" in err_str.lower() or "TPD" in err_str
             if is_rate_limit:
                 if is_daily_limit:
@@ -388,7 +389,7 @@ def run_review(original_code: str, migrated_code: str, max_retries: int = 3) -> 
                     print(f"  Aguarde reset as 00:00 UTC ou use --skip-review.")
                     raise
                 wait = 45 * attempt
-                print(f"  Rate limit Groq (por minuto) — aguardando {wait}s...")
+                print(f"  Rate limit — aguardando {wait}s...")
                 time.sleep(wait)
                 if attempt == max_retries:
                     raise
@@ -409,6 +410,8 @@ def run_review(original_code: str, migrated_code: str, max_retries: int = 3) -> 
 
 
 # ── Pipeline principal ─────────────────────────────────────────────────────────
+
+MAX_REVISION_LOOPS = 3   # evita loop infinito
 
 def main():
     import argparse
@@ -449,8 +452,8 @@ def main():
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-
     input_path = Path(args.input)
+
     if not input_path.exists():
         print(f"ERRO: Arquivo de entrada nao encontrado: {input_path}")
         sys.exit(1)
@@ -465,11 +468,43 @@ def main():
     print(f"  Ollama : {'SIM — ' + OLLAMA_MODEL if OLLAMA_DISPONIVEL else 'NAO (usando Groq)'}")
     print(f"{'#'*60}")
 
-    pipeline_start = time.time()
+    pipeline_start  = time.time()
+    migration_result = None
+    test_result      = {"decision": "skipped"}
+    review_result    = {}
 
-    # ── ETAPA 1: Migration ────────────────────────────────────────────────────
-    migration_result = run_migration(original_code, num_examples=args.examples)
-    migrated_code = migration_result["migrated_code"]
+    # ── Loop migration → test (com revisão se necessário) ─────────────────────
+    current_original = original_code
+    current_migrated = ""
+    revision_loop    = 0
+
+    while revision_loop <= MAX_REVISION_LOOPS:
+
+        # ── ETAPA: Migration ──────────────────────────────────────────────────
+        # Na primeira iteração migra do original.
+        # Nas revisões subsequentes o migrador recebe o código original + contexto
+        # das regressões detectadas pelo Router para guiar a remigração.
+        if revision_loop == 0:
+            migration_result = run_migration(current_original, num_examples=args.examples)
+        else:
+            # Passa as sugestões do Router como contexto adicional para o migrador
+            suggestions = test_result.get("router_decision", {}).get("suggestions", [])
+            context = (
+                "\n\nCONTEXTO DE REVISÃO (iteração {}):\n".format(revision_loop)
+                + "\n".join(f"- {s}" for s in suggestions)
+            ) if suggestions else ""
+            migration_result = run_migration(current_original + context, num_examples=args.examples)
+
+        current_migrated = migration_result["migrated_code"]
+
+        # Salva artefato da iteração
+        suffix = f"_iter{revision_loop}" if revision_loop > 0 else ""
+        (out_dir / f"migrated_code{suffix}.py").write_text(current_migrated, encoding="utf-8")
+        (out_dir / f"migration_result{suffix}.json").write_text(
+            json.dumps({k: v for k, v in migration_result.items() if k != "migrated_code"},
+                       ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     (out_dir / "migrated_code.py").write_text(migrated_code, encoding="utf-8")
     (out_dir / "migration_result.json").write_text(
@@ -509,15 +544,22 @@ def main():
         print("\n  ETAPA 2 — TEST AGENT: pulada (--skip-test)")
         test_result = {"decision": "skipped"}
 
-    # ── ETAPA 3: Review ───────────────────────────────────────────────────────
-    review_result: dict = {}
+        if revision_loop > MAX_REVISION_LOOPS:
+            print(f"\n  ⚠️  Limite de {MAX_REVISION_LOOPS} revisões atingido — prosseguindo para review")
+            break
+
+        print(f"\n  🔄 Router: NEEDS_REVISION — iniciando iteração {revision_loop}/{MAX_REVISION_LOOPS}")
+        print(f"  Aguardando 15s para respeitar rate limit do Groq...")
+        time.sleep(15)
+
+    # ── ETAPA: Review ─────────────────────────────────────────────────────────
     if not args.skip_review:
         # Review usa Gemini (pesados) + Groq 8B (leves) — pausa para Groq nos leves
         wait_review = 10 if not OLLAMA_DISPONIVEL else 5
         print(f"\n  Aguardando {wait_review}s antes do review (Groq rate limit)...")
         time.sleep(wait_review)
         try:
-            review_result = run_review(original_code, migrated_code)
+            review_result = run_review(current_original, current_migrated)
         except Exception as exc:
             print(f"\n  AVISO: review_agent falhou: {exc}")
             review_result = {"error": str(exc)}
@@ -529,9 +571,9 @@ def main():
             review_result["relatorio_final"], encoding="utf-8"
         )
     if review_result:
-        review_save = {k: v for k, v in review_result.items() if k != "relatorio_final"}
         (out_dir / "review_result.json").write_text(
-            json.dumps(review_save, ensure_ascii=False, indent=2),
+            json.dumps({k: v for k, v in review_result.items() if k != "relatorio_final"},
+                       ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 
@@ -568,8 +610,6 @@ def main():
                 "backend": test_result.get("backend"),
             },
             "review": {
-                "agentes_acionados": review_result.get("agentes_acionados"),
-                "iteracoes": review_result.get("iteracoes"),
                 "deve_reprocessar": review_result.get("deve_reprocessar"),
                 "achados_total": (
                     len(review_result.get("achados_semantica") or [])
@@ -594,9 +634,9 @@ def main():
     print(f"  Migration   : {migration_result.get('status')}")
     print(f"  Test        : {test_result.get('decision', 'skipped')}")
     if review_result.get("error"):
-        print(f"  Review      : erro — {review_result['error'][:80]}")
+        print(f"  Review          : erro — {review_result['error'][:80]}")
     elif args.skip_review:
-        print(f"  Review      : pulado")
+        print(f"  Review          : pulado")
     else:
         status_rev = "reprocessar" if review_result.get("deve_reprocessar") else "aprovado"
         print(f"  Review      : {status_rev}")
@@ -609,7 +649,7 @@ def main():
         print("── PREVIA DO RELATORIO DE REVISAO ──────────────────────")
         print(preview)
         if len(relatorio) > 1200:
-            print(f"... [+{len(relatorio)-1200} caracteres — ver {out_dir}/review_report.md]")
+            print(f"... [+{len(relatorio)-1200} chars — ver {out_dir}/review_report.md]")
         print("────────────────────────────────────────────────────────")
 
 
