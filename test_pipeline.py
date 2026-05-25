@@ -1,13 +1,26 @@
 """
 Pipeline de Integração: migration_agent → test_agent → review_agent
 
-Executa o fluxo completo usando Groq (ChatGroq) para todos os agentes.
+Detecta automaticamente se o Ollama está disponível e o usa como backend
+principal para migration_agent e test_agent (sem custo, sem rate limit).
+Cai para Groq automaticamente se o Ollama não estiver rodando.
+
+O review_agent usa estratégia multi-LLM:
+  · Nós pesados (parser, semântico, segurança, crítico): Gemini 2.5 Flash
+  · Nós leves (classificador, lint, relatório): Groq llama-3.1-8b-instant
+
+Variáveis de ambiente necessárias para o review_agent:
+    GOOGLE_API_KEY — obrigatória para nós pesados (Gemini)
+    GROQ_API_KEY   — obrigatória para nós leves (Groq 8B)
 
 Uso:
     python test_pipeline.py [--input url.py] [--output-dir .pipeline_output]
 
-Pré-requisito:
-    GROQ_API_KEY em variável de ambiente ou arquivo .env
+Variáveis de ambiente:
+    GROQ_API_KEY   — obrigatória se Ollama não estiver disponível,
+                     ou se review não for pulado (--skip-review)
+    OLLAMA_MODEL   — modelo Ollama a usar (padrão: detectado automaticamente)
+    OLLAMA_HOST    — host do Ollama (padrão: http://localhost:11434)
 """
 
 from __future__ import annotations
@@ -16,60 +29,202 @@ import json
 import os
 import sys
 import time
+import types
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-# ── Configuração de paths ──────────────────────────────────────────────────────
+# ── Paths ─────────────────────────────────────────────────────────────────────
 
-REPO_ROOT        = Path(__file__).resolve().parent
-MIGRATION_DIR    = REPO_ROOT / "migration_agent"
-TEST_AGENT_DIR   = REPO_ROOT / "test_agent"
+REPO_ROOT       = Path(__file__).resolve().parent
+MIGRATION_DIR   = REPO_ROOT / "migration_agent"
+TEST_AGENT_DIR  = REPO_ROOT / "test_agent"
 REVIEW_AGENT_DIR = REPO_ROOT / "review_agent"
 
 for d in [str(REPO_ROOT), str(MIGRATION_DIR), str(TEST_AGENT_DIR), str(REVIEW_AGENT_DIR)]:
     if d not in sys.path:
         sys.path.insert(0, d)
 
-# ── Patch ChatOllama → ChatGroq ───────────────────────────────────────────────
-
 from dotenv import load_dotenv
 load_dotenv(dotenv_path=REPO_ROOT / ".env", override=False)
+
+# ── Detecção de Ollama ────────────────────────────────────────────────────────
+
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+
+# Ordem de preferência de modelos Ollama para migration + test
+_OLLAMA_MODEL_PREFS = [
+    "llama3.1", "llama3.1:latest",
+    "llama3.2", "llama3.2:latest",
+    "llama3",   "llama3:latest",
+    "llama3.3", "llama3.3:latest",
+]
+
+
+def _detectar_ollama() -> tuple[bool, str]:
+    """
+    Verifica se o Ollama está rodando e retorna (disponível, nome_do_modelo).
+    Testa a API REST em OLLAMA_HOST com timeout de 2s para não bloquear
+    o start do pipeline caso o serviço não esteja ativo.
+    """
+    env_model = os.getenv("OLLAMA_MODEL", "").strip()
+    try:
+        url = f"{OLLAMA_HOST}/api/tags"
+        with urllib.request.urlopen(url, timeout=2) as resp:
+            data = json.loads(resp.read())
+
+        modelos = [m["name"] for m in data.get("models", [])]
+
+        # Modelo especificado via env tem prioridade absoluta
+        if env_model:
+            if env_model in modelos or any(m.startswith(env_model) for m in modelos):
+                return True, env_model
+            print(f"  AVISO: OLLAMA_MODEL='{env_model}' não encontrado. "
+                  f"Modelos disponíveis: {modelos}")
+            return False, ""
+
+        # Busca pelo modelo preferido na lista instalada
+        for pref in _OLLAMA_MODEL_PREFS:
+            if pref in modelos:
+                return True, pref
+
+        # Qualquer modelo llama disponível serve
+        llamas = [m for m in modelos if "llama" in m.lower()]
+        if llamas:
+            return True, llamas[0]
+
+        if modelos:
+            print(f"  AVISO: Ollama está rodando mas não há modelo Llama instalado.")
+            print(f"  Execute: ollama pull llama3.1")
+        return False, ""
+
+    except Exception:
+        return False, ""
+
+
+# ── Configuração do backend LLM ───────────────────────────────────────────────
+
+print("\n  Detectando backend LLM disponível...")
+OLLAMA_DISPONIVEL, OLLAMA_MODEL = _detectar_ollama()
 
 GROQ_API_KEY = (
     os.getenv("GROQ_API_KEY")
     or os.getenv("GROQ_KEY")
     or os.getenv("API_KEY")
 )
-if not GROQ_API_KEY:
-    print("ERRO: GROQ_API_KEY não encontrada.")
+
+if OLLAMA_DISPONIVEL:
+    print(f"  [Ollama] Disponivel — modelo: {OLLAMA_MODEL}")
+    print(f"  Migration + Test usarao Ollama (sem rate limit)")
+    print(f"  Review usara Gemini (nos pesados) + Groq 8B (nos leves)")
+else:
+    print(f"  [Ollama] Nao disponivel — usando Groq para todos os agentes")
+    if not GROQ_API_KEY:
+        print("  ERRO: GROQ_API_KEY nao encontrada e Ollama nao esta disponivel.")
+        print("  Opcoes:")
+        print("    1. Instale o Ollama: https://ollama.com  e execute: ollama pull llama3.1")
+        print("    2. Defina GROQ_API_KEY no .env ou como variavel de ambiente")
+        sys.exit(2)
+
+if not GROQ_API_KEY and not OLLAMA_DISPONIVEL:
+    # Caso impossível mas garante clareza
+    print("  ERRO: nenhum backend disponivel.")
     sys.exit(2)
 
-import types
-import langchain_groq
 
-def _make_groq_compat(model: str = "llama3", temperature: float = 0, **_kwargs):
-    import traceback
-    stack = "".join(traceback.format_stack())
-    use_large = "test_agent" in stack or "agent.py" in stack
-    model_name = "llama-3.3-70b-versatile" if use_large else "llama-3.1-8b-instant"
-    return langchain_groq.ChatGroq(
-        api_key=GROQ_API_KEY,
-        model_name=model_name,
-        temperature=temperature,
-    )
+# ── Monkey-patch de ChatOllama → ChatGroq (somente se Ollama indisponivel) ────
+# Quando Ollama está disponível, os agentes usam ChatOllama nativamente.
+# Quando não está, substituímos ChatOllama por ChatGroq de forma transparente.
 
-_fake_ollama_mod = types.ModuleType("langchain_ollama")
-_fake_ollama_mod.ChatOllama = _make_groq_compat  # type: ignore[attr-defined]
-sys.modules.setdefault("langchain_ollama", _fake_ollama_mod)
+if not OLLAMA_DISPONIVEL:
+    import langchain_groq
 
-# ── Imports dos agentes ────────────────────────────────────────────────────────
+    def _make_groq_compat(model: str = "llama3", temperature: float = 0, **_kwargs):
+        """
+        Substitui ChatOllama por ChatGroq quando Ollama não está disponível.
+
+        Escolha de modelo:
+          - test_agent (node_analyzer envia código completo): 70B — janela grande
+          - migration_agent (inferência + migração): 8B — prompts menores
+        """
+        import traceback
+        stack = "".join(traceback.format_stack())
+        use_large = "test_agent" in stack or "agent.py" in stack
+        model_name = "llama-3.3-70b-versatile" if use_large else "llama-3.1-8b-instant"
+        return langchain_groq.ChatGroq(
+            api_key=GROQ_API_KEY,
+            model_name=model_name,
+            temperature=temperature,
+        )
+
+    _fake_ollama_mod = types.ModuleType("langchain_ollama")
+    _fake_ollama_mod.ChatOllama = _make_groq_compat  # type: ignore[attr-defined]
+    sys.modules["langchain_ollama"] = _fake_ollama_mod
+
+elif "langchain_ollama" not in sys.modules:
+    # Ollama disponível: garante que langchain_ollama nativo é usado,
+    # substituindo o model name para o modelo detectado
+    try:
+        from langchain_ollama import ChatOllama as _NativeChatOllama
+
+        def _ollama_com_modelo_detectado(
+            model: str = "llama3", temperature: float = 0, **kwargs
+        ):
+            """
+            Usa o ChatOllama nativo mas força o modelo detectado
+            (evita erros de modelo não encontrado quando o agente
+            hardcoda "llama3" mas só "llama3.1" está instalado).
+            """
+            return _NativeChatOllama(
+                model=OLLAMA_MODEL,
+                temperature=temperature,
+                **kwargs,
+            )
+
+        _patched_ollama_mod = types.ModuleType("langchain_ollama")
+        _patched_ollama_mod.ChatOllama = _ollama_com_modelo_detectado  # type: ignore
+        sys.modules["langchain_ollama"] = _patched_ollama_mod
+
+    except ImportError:
+        # langchain_ollama não instalado mas Ollama está rodando —
+        # instala o pacote em tempo real como último recurso
+        print("  AVISO: pacote langchain-ollama nao instalado.")
+        print("  Execute: pip install langchain-ollama")
+        print("  Continuando com Groq como fallback...")
+        OLLAMA_DISPONIVEL = False
+        import langchain_groq
+
+        def _make_groq_compat(model: str = "llama3", temperature: float = 0, **_kwargs):  # type: ignore[misc]
+            return langchain_groq.ChatGroq(
+                api_key=GROQ_API_KEY,
+                model_name="llama-3.1-8b-instant",
+                temperature=temperature,
+            )
+
+        _fake_ollama_mod = types.ModuleType("langchain_ollama")
+        _fake_ollama_mod.ChatOllama = _make_groq_compat  # type: ignore
+        sys.modules["langchain_ollama"] = _fake_ollama_mod
+
+else:
+    # langchain_ollama já estava importado — sobrescreve ChatOllama com modelo detectado
+    from langchain_ollama import ChatOllama as _NativeChatOllama  # type: ignore[assignment]
+    import langchain_ollama as _ollama_mod
+
+    def _ollama_com_modelo_detectado(model: str = "llama3", temperature: float = 0, **kw):  # type: ignore[misc]
+        return _NativeChatOllama(model=OLLAMA_MODEL, temperature=temperature, **kw)
+
+    _ollama_mod.ChatOllama = _ollama_com_modelo_detectado  # type: ignore[attr-defined]
+
+
+# ── Importação dinâmica dos agentes ───────────────────────────────────────────
 
 def _import_migration_agent():
     import importlib.util
     spec = importlib.util.spec_from_file_location(
-        "langgraph_mig03", MIGRATION_DIR / "langgraph-mig03.py",
+        "langgraph_mig03", MIGRATION_DIR / "langgraph-mig03.py"
     )
     mod = importlib.util.module_from_spec(spec)
+    mod.__name__ = "langgraph_mig03"
     spec.loader.exec_module(mod)
     return mod
 
@@ -77,7 +232,7 @@ def _import_migration_agent():
 def _import_test_agent():
     import importlib.util
     spec = importlib.util.spec_from_file_location(
-        "test_agent_agent", TEST_AGENT_DIR / "agent" / "agent.py",
+        "test_agent_agent", TEST_AGENT_DIR / "agent" / "agent.py"
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -87,23 +242,32 @@ def _import_test_agent():
 def _import_review_agent():
     import importlib.util
     spec = importlib.util.spec_from_file_location(
-        "review_agent", REVIEW_AGENT_DIR / "review-agent.py",
+        "review_agent", REVIEW_AGENT_DIR / "review-agent.py"
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
 
-# ── Funções de chamada de cada agente ─────────────────────────────────────────
+# ── Funções de execução de cada etapa ─────────────────────────────────────────
 
 def run_migration(codigo_original: str, num_examples: int = 10) -> dict:
+    """Executa o migration_agent. Retorna: migrated_code, status, messages."""
     print(f"\n{'='*60}")
-    print("  ETAPA — MIGRATION AGENT")
+    print("  ETAPA 1 — MIGRATION AGENT")
+    backend = f"Ollama ({OLLAMA_MODEL})" if OLLAMA_DISPONIVEL else "Groq (llama-3.1-8b-instant)"
+    print(f"  Backend : {backend}")
     print(f"{'='*60}")
     t0 = time.time()
 
     mig = _import_migration_agent()
-    exemplos = mig.carregar_exemplos_treino(num_examples) or []
+
+    print(f"  Carregando {num_examples} exemplos do dataset...")
+    exemplos = mig.carregar_exemplos_treino(num_examples)
+    if not exemplos:
+        print("  AVISO: nenhum exemplo carregado — usando prompt base sem few-shot.")
+        exemplos = []
+
     prompt_sistema = mig.criar_prompt_treino(exemplos)
     agente = mig.criar_agente_migracao(exemplos, prompt_sistema)
 
@@ -120,12 +284,17 @@ def run_migration(codigo_original: str, num_examples: int = 10) -> dict:
 
     elapsed        = time.time() - t0
     codigo_migrado = resultado.get("codigo_migrado", "")
-    status         = resultado.get("status", "unknown")
-    messages_text  = [m.content for m in resultado.get("messages", []) if isinstance(m, AIMessage)]
+    status = resultado.get("status", "unknown")
+    messages_text = [
+        m.content for m in resultado.get("messages", [])
+        if isinstance(m, AIMessage)
+    ]
 
     print(f"  Status  : {status}")
     print(f"  Tempo   : {elapsed:.1f}s")
     print(f"  Linhas  : {len(codigo_migrado.splitlines())}")
+    for msg in messages_text:
+        print(f"  > {msg}")
 
     if not codigo_migrado.strip():
         print("  ERRO: Migration não gerou código.")
@@ -137,20 +306,22 @@ def run_migration(codigo_original: str, num_examples: int = 10) -> dict:
         "status":               status,
         "messages":             messages_text,
         "inferencia_semantica": resultado.get("inferencia_semantica", ""),
-        "elapsed_s":            elapsed,
+        "elapsed_s": elapsed,
+        "backend": backend,
     }
 
 
 def run_test(original_code: str, migrated_code: str) -> dict:
-    """
-    Executa o test_agent e retorna o resultado completo incluindo router_decision.
-    """
+    """Executa o test_agent. Retorna: report, evaluation, decision, iteration."""
     print(f"\n{'='*60}")
-    print("  ETAPA — TEST AGENT")
+    print("  ETAPA 2 — TEST AGENT")
+    backend = f"Ollama ({OLLAMA_MODEL})" if OLLAMA_DISPONIVEL else "Groq (llama-3.3-70b-versatile)"
+    print(f"  Backend : {backend}")
     print(f"{'='*60}")
     t0 = time.time()
 
-    ta     = _import_test_agent()
+    ta = _import_test_agent()
+    print("  Construindo grafo de testes...")
     result = ta.run_agent(original_code, migrated_code)
     elapsed = time.time() - t0
 
@@ -159,31 +330,47 @@ def run_test(original_code: str, migrated_code: str) -> dict:
     needs_revision  = router_decision.get("needs_revision", False)
     verdict         = "NEEDS_REVISION" if needs_revision else "APPROVED"
 
-    print(f"  Router decision : {verdict}")
-    print(f"  Equivalence     : {evaluation.get('execution_summary', {}).get('equivalence_rate', 'N/A')}%")
-    print(f"  Valid baseline  : {evaluation.get('execution_summary', {}).get('valid_baseline', 'N/A')} tests")
-    print(f"  Regressions     : {evaluation.get('execution_summary', {}).get('regressions', 'N/A')}")
-    print(f"  Tempo           : {elapsed:.1f}s")
-
-    for reason in router_decision.get("reasons", []):
-        print(f"  → {reason}")
-    for suggestion in router_decision.get("suggestions", []):
-        print(f"  💡 {suggestion}")
+    print(f"  Decision  : {decision}")
+    print(f"  Iteracoes : {result.get('iteration', 0)}")
+    print(f"  Score     : {scores.get('overall', 'N/A')}")
+    print(f"  Tempo     : {elapsed:.1f}s")
 
     return {
-        "report":          result.get("report", ""),
-        "evaluation":      evaluation,
-        "router_decision": router_decision,
-        "needs_revision":  needs_revision,
-        "elapsed_s":       elapsed,
+        "report": result.get("report", ""),
+        "evaluation": evaluation,
+        "decision": decision,
+        "iteration": result.get("iteration", 0),
+        "elapsed_s": elapsed,
+        "backend": backend,
     }
 
 
 def run_review(original_code: str, migrated_code: str, max_retries: int = 3) -> dict:
+    """
+    Executa o review_agent diretamente (sem FastAPI).
+    Estratégia multi-LLM definida internamente pelo review-agent.py:
+      · Nós pesados → Gemini 2.5 Flash (GOOGLE_API_KEY)
+      · Nós leves   → Groq llama-3.1-8b-instant (GROQ_API_KEY)
+    Retry externo com backoff para erros que escapem dos retries internos.
+    """
     print(f"\n{'='*60}")
-    print("  ETAPA — REVIEW AGENT")
+    print("  ETAPA 3 — REVIEW AGENT")
+    print(f"  Backend : Gemini 2.5 Flash (nos pesados) + Groq 8B (nos leves)")
     print(f"{'='*60}")
     t0 = time.time()
+
+    google_key = os.getenv("GOOGLE_API_KEY")
+    if not GROQ_API_KEY or not google_key:
+        faltando = []
+        if not GROQ_API_KEY:
+            faltando.append("GROQ_API_KEY (nós leves: classificador, lint, relatório)")
+        if not google_key:
+            faltando.append("GOOGLE_API_KEY (nós pesados: parser, semântico, segurança, crítico)")
+        raise RuntimeError(
+            "Chaves de API ausentes para o review_agent:\n" +
+            "\n".join(f"  · {k}" for k in faltando) +
+            "\nDefina as chaves no .env ou use --skip-review para pular esta etapa."
+        )
 
     ra = _import_review_agent()
 
@@ -198,7 +385,8 @@ def run_review(original_code: str, migrated_code: str, max_retries: int = 3) -> 
             is_daily_limit = "tokens per day" in err_str.lower() or "TPD" in err_str
             if is_rate_limit:
                 if is_daily_limit:
-                    print("  ATENÇÃO: Limite DIÁRIO de tokens Groq atingido.")
+                    print(f"\n  ATENCAO: Limite DIARIO de tokens Groq atingido.")
+                    print(f"  Aguarde reset as 00:00 UTC ou use --skip-review.")
                     raise
                 wait = 45 * attempt
                 print(f"  Rate limit — aguardando {wait}s...")
@@ -209,10 +397,16 @@ def run_review(original_code: str, migrated_code: str, max_retries: int = 3) -> 
                 raise
 
     elapsed = time.time() - t0
-    print(f"  Deve reprocessar : {result.get('deve_reprocessar', False)}")
-    print(f"  Tempo            : {elapsed:.1f}s")
 
-    return {**result, "elapsed_s": elapsed}
+    print(f"  Agentes acionados : {result.get('agentes_acionados', [])}")
+    print(f"  Iteracoes critico : {result.get('iteracoes', 0)}")
+    print(f"  Deve reprocessar  : {result.get('deve_reprocessar', False)}")
+    print(f"  Achados semantica : {len(result.get('achados_semantica', []))}")
+    print(f"  Achados seguranca : {len(result.get('achados_seguranca', []))}")
+    print(f"  Achados lint      : {len(result.get('achados_lint', []))}")
+    print(f"  Tempo             : {elapsed:.1f}s")
+
+    return {**result, "elapsed_s": elapsed, "backend": "Gemini 2.5 Flash (pesados) + Groq 8B (leves)"}
 
 
 # ── Pipeline principal ─────────────────────────────────────────────────────────
@@ -222,29 +416,56 @@ MAX_REVISION_LOOPS = 3   # evita loop infinito
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Pipeline integrado: migration → test → review")
-    parser.add_argument("--input",       default=str(REPO_ROOT / "url.py"))
-    parser.add_argument("--output-dir",  default=str(REPO_ROOT / ".pipeline_output"))
-    parser.add_argument("--examples",    type=int, default=10)
-    parser.add_argument("--skip-test",   action="store_true")
-    parser.add_argument("--skip-review", action="store_true")
+    parser = argparse.ArgumentParser(
+        description="Pipeline integrado: migration → test → review"
+    )
+    parser.add_argument(
+        "--input", default=str(REPO_ROOT / "url.py"),
+        help="Caminho para o arquivo Python urllib de entrada (padrao: url.py)",
+    )
+    parser.add_argument(
+        "--output-dir", default=str(REPO_ROOT / ".pipeline_output"),
+        help="Diretorio para salvar os artefatos de saida",
+    )
+    parser.add_argument(
+        "--examples", type=int, default=10,
+        help="Exemplos few-shot para o migration_agent (padrao: 10)",
+    )
+    parser.add_argument(
+        "--skip-test", action="store_true",
+        help="Pular etapa test_agent",
+    )
+    parser.add_argument(
+        "--skip-review", action="store_true",
+        help="Pular etapa review_agent (util quando cota diaria Groq esta esgotada)",
+    )
+    parser.add_argument(
+        "--ollama-model", default="",
+        help="Forcar um modelo Ollama especifico (ex: llama3.1, codellama)",
+    )
     args = parser.parse_args()
 
-    out_dir    = Path(args.output_dir)
+    # Sobrescreve modelo se passado via flag
+    global OLLAMA_MODEL
+    if args.ollama_model:
+        OLLAMA_MODEL = args.ollama_model
+
+    out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     input_path = Path(args.input)
 
     if not input_path.exists():
-        print(f"ERRO: Arquivo não encontrado: {input_path}")
+        print(f"ERRO: Arquivo de entrada nao encontrado: {input_path}")
         sys.exit(1)
 
     original_code = input_path.read_text(encoding="utf-8")
 
     print(f"\n{'#'*60}")
-    print(f"  PIPELINE DE INTEGRAÇÃO")
-    print(f"  Início : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  PIPELINE DE INTEGRACAO")
+    print(f"  Inicio : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  Input  : {input_path}")
     print(f"  Output : {out_dir.resolve()}")
+    print(f"  Ollama : {'SIM — ' + OLLAMA_MODEL if OLLAMA_DISPONIVEL else 'NAO (usando Groq)'}")
     print(f"{'#'*60}")
 
     pipeline_start  = time.time()
@@ -285,38 +506,43 @@ def main():
             encoding="utf-8",
         )
 
-        # ── ETAPA: Test ───────────────────────────────────────────────────────
-        if args.skip_test:
-            print("\n  ETAPA TEST AGENT: pulada (--skip-test)")
-            test_result = {"decision": "skipped", "needs_revision": False}
-            break
+    (out_dir / "migrated_code.py").write_text(migrated_code, encoding="utf-8")
+    (out_dir / "migration_result.json").write_text(
+        json.dumps(
+            {k: v for k, v in migration_result.items() if k != "migrated_code"},
+            ensure_ascii=False, indent=2,
+        ),
+        encoding="utf-8",
+    )
 
+    # ── ETAPA 2: Test ─────────────────────────────────────────────────────────
+    test_result: dict = {}
+    if not args.skip_test:
+        # Se Ollama está disponível, não há rate limit — sem pausa necessária.
+        # Se estiver usando Groq, aguarda para não conflitar com a etapa 1.
+        if not OLLAMA_DISPONIVEL:
+            print("\n  Aguardando 10s (rate limit Groq entre etapas)...")
+            time.sleep(10)
         try:
-            test_result = run_test(current_original, current_migrated)
+            test_result = run_test(original_code, migrated_code)
+            if test_result.get("report"):
+                (out_dir / "test_report.md").write_text(
+                    test_result["report"], encoding="utf-8"
+                )
+            (out_dir / "test_result.json").write_text(
+                json.dumps(
+                    {k: v for k, v in test_result.items() if k != "report"},
+                    ensure_ascii=False, indent=2,
+                ),
+                encoding="utf-8",
+            )
         except Exception as exc:
             print(f"\n  AVISO: test_agent falhou: {exc}")
-            test_result = {"error": str(exc), "needs_revision": False}
-            break
-
-        # Salva relatório de teste da iteração
-        if test_result.get("report"):
-            (out_dir / f"test_report{suffix}.md").write_text(
-                test_result["report"], encoding="utf-8"
-            )
-        (out_dir / f"test_result{suffix}.json").write_text(
-            json.dumps({k: v for k, v in test_result.items() if k != "report"},
-                       ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-
-        # ── Decisão do Router ─────────────────────────────────────────────────
-        needs_revision = test_result.get("needs_revision", False)
-
-        if not needs_revision:
-            print(f"\n  ✅ Router: APPROVED após {revision_loop + 1} iteração(ões)")
-            break
-
-        revision_loop += 1
+            print("  Continuando para o review_agent...")
+            test_result = {"error": str(exc), "decision": "error"}
+    else:
+        print("\n  ETAPA 2 — TEST AGENT: pulada (--skip-test)")
+        test_result = {"decision": "skipped"}
 
         if revision_loop > MAX_REVISION_LOOPS:
             print(f"\n  ⚠️  Limite de {MAX_REVISION_LOOPS} revisões atingido — prosseguindo para review")
@@ -328,15 +554,17 @@ def main():
 
     # ── ETAPA: Review ─────────────────────────────────────────────────────────
     if not args.skip_review:
-        print("\n  Aguardando 15s antes do review_agent...")
-        time.sleep(15)
+        # Review usa Gemini (pesados) + Groq 8B (leves) — pausa para Groq nos leves
+        wait_review = 10 if not OLLAMA_DISPONIVEL else 5
+        print(f"\n  Aguardando {wait_review}s antes do review (Groq rate limit)...")
+        time.sleep(wait_review)
         try:
             review_result = run_review(current_original, current_migrated)
         except Exception as exc:
             print(f"\n  AVISO: review_agent falhou: {exc}")
             review_result = {"error": str(exc)}
     else:
-        print("\n  ETAPA REVIEW AGENT: pulada (--skip-review)")
+        print("\n  ETAPA 3 — REVIEW AGENT: pulada (--skip-review)")
 
     if review_result.get("relatorio_final"):
         (out_dir / "review_report.md").write_text(
@@ -353,22 +581,33 @@ def main():
     total_elapsed = time.time() - pipeline_start
 
     pipeline_summary = {
-        "pipeline_start":   datetime.now().isoformat(),
-        "total_elapsed_s":  round(total_elapsed, 1),
-        "input_file":       str(input_path),
-        "revision_loops":   revision_loop,
+        "pipeline_start": datetime.now().isoformat(),
+        "total_elapsed_s": round(total_elapsed, 1),
+        "input_file": str(input_path),
+        "backend": {
+            "ollama_disponivel": OLLAMA_DISPONIVEL,
+            "ollama_model": OLLAMA_MODEL if OLLAMA_DISPONIVEL else None,
+            "groq_usado_em": (
+                ["migration", "test", "review-leves"] if not OLLAMA_DISPONIVEL
+                else (["review-leves"] if not args.skip_review else [])
+            ),
+            "gemini_usado_em": (
+                ["review-pesados"] if not args.skip_review else []
+            ),
+        },
         "stages": {
             "migration": {
-                "status":          migration_result.get("status") if migration_result else None,
-                "elapsed_s":       migration_result.get("elapsed_s") if migration_result else None,
-                "migrated_lines":  len(current_migrated.splitlines()),
+                "status": migration_result.get("status"),
+                "elapsed_s": migration_result.get("elapsed_s"),
+                "migrated_lines": len(migrated_code.splitlines()),
+                "backend": migration_result.get("backend"),
             },
             "test": {
-                "needs_revision":  test_result.get("needs_revision"),
-                "equivalence":     test_result.get("evaluation", {}).get("execution_summary", {}).get("equivalence_rate"),
-                "regressions":     test_result.get("evaluation", {}).get("execution_summary", {}).get("regressions"),
-                "elapsed_s":       test_result.get("elapsed_s"),
-                "error":           test_result.get("error"),
+                "decision": test_result.get("decision"),
+                "iteration": test_result.get("iteration"),
+                "elapsed_s": test_result.get("elapsed_s"),
+                "error": test_result.get("error"),
+                "backend": test_result.get("backend"),
             },
             "review": {
                 "deve_reprocessar": review_result.get("deve_reprocessar"),
@@ -378,7 +617,8 @@ def main():
                     + len(review_result.get("achados_lint") or [])
                 ),
                 "elapsed_s": review_result.get("elapsed_s"),
-                "error":     review_result.get("error"),
+                "error": review_result.get("error"),
+                "backend": review_result.get("backend"),
             },
         },
     }
@@ -389,24 +629,24 @@ def main():
     )
 
     print(f"\n{'#'*60}")
-    print(f"  PIPELINE CONCLUÍDO")
-    print(f"  Tempo total     : {total_elapsed:.1f}s")
-    print(f"  Iterações loop  : {revision_loop}")
-    print(f"  Migration       : {migration_result.get('status') if migration_result else 'N/A'}")
-    print(f"  Test            : {'NEEDS_REVISION' if test_result.get('needs_revision') else test_result.get('decision', 'skipped')}")
+    print(f"  PIPELINE CONCLUIDO")
+    print(f"  Tempo total : {total_elapsed:.1f}s")
+    print(f"  Migration   : {migration_result.get('status')}")
+    print(f"  Test        : {test_result.get('decision', 'skipped')}")
     if review_result.get("error"):
         print(f"  Review          : erro — {review_result['error'][:80]}")
     elif args.skip_review:
         print(f"  Review          : pulado")
     else:
-        print(f"  Review          : {'reprocessar' if review_result.get('deve_reprocessar') else 'aprovado'}")
-    print(f"  Artefatos       : {out_dir.resolve()}")
+        status_rev = "reprocessar" if review_result.get("deve_reprocessar") else "aprovado"
+        print(f"  Review      : {status_rev}")
+    print(f"  Artefatos   : {out_dir.resolve()}")
     print(f"{'#'*60}\n")
 
-    relatorio = review_result.get("relatorio_final", "")
+    relatorio = review_result.get("relatorio_final", "") if review_result else ""
     if relatorio:
         preview = relatorio[:1200]
-        print("── PRÉVIA DO RELATÓRIO DE REVISÃO ──────────────────────")
+        print("── PREVIA DO RELATORIO DE REVISAO ──────────────────────")
         print(preview)
         if len(relatorio) > 1200:
             print(f"... [+{len(relatorio)-1200} chars — ver {out_dir}/review_report.md]")
