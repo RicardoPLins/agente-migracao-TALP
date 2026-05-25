@@ -415,7 +415,7 @@ if __name__ == "__main__":
     
     # Read urllib code from url.py
     try:
-        url_file_path = os.path.join(os.path.dirname(__file__), "..", "url-ckan.py")
+        url_file_path = os.path.join(os.path.dirname(__file__), "..", "url.py")
         with open(url_file_path, "r") as f:
             codigo_usuario = f.read().strip()
     except FileNotFoundError:
