@@ -1,6 +1,3 @@
-Here is the migrated Python code:
-
-```Python
 import requests
 import gzip
 import io

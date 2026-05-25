@@ -1,47 +1,29 @@
 {
-  "raw_diff": "diff --git \"a/C:\\\\Users\\\\joiso\\\\AppData\\\\Local\\\\Temp\\\\tmpqy0_g2t4_original.py\" \"b/C:\\\\Users\\\\joiso\\\\AppData\\\\Local\\\\Temp\\\\tmpl7omvfln_migrado.py\"\nindex 2a1f393..437b274 100644\n--- \"a/C:\\\\Users\\\\joiso\\\\AppData\\\\Local\\\\Temp\\\\tmpqy0_g2t4_original.py\"\n+++ \"b/C:\\\\Users\\\\joiso\\\\AppData\\\\Local\\\\Temp\\\\tmpl7omvfln_migrado.py\"\n@@ -1,19 +1,17 @@\n-import urllib.parse\n-import urllib.request\n+import requests\n import gzip\n import os\n import json\n import sys\n import time\n import io\n import argparse\n import configparser\n import logging\n+import urlparse\n \n-#TODO find way to merge messages if already present\n-#in order to avoid to scrape all the conversation every time\n class ConversationScraper:\n     \"\"\"Scraper that retrieves, manipulates and stores all messages belonging to a specific Faceboo conversation\"\"\"\n \n     REQUEST_WAIT = 10\n     ERROR_WAIT = 30\n@@ -56,12 +54,11 @@ class ConversationScraper:\n                      \"client\": \"web_messenger\",\n                      \"__a\": \"\",\n                      \"__dyn\": \"\",\n                      \"__req\": \"\",\n                      \"fb_dtsg\": self._fb_dtsg}\n-        data = urllib.parse.urlencode(dataForm)\n-        data = data.encode('utf-8')\n+        data = requests.utils.urlencode(dataForm)\n         return data\n \n     \"\"\"\n     POST Request all header:\n \n@@ -96,14 +93,14 @@ class ConversationScraper:\n                    \"cache-control\": \"no-cache\"}\n \n         url = \"https://www.facebook.com/ajax/mercury/thread_info.php\"\n \n         start = time.time()\n-        req = urllib.request.Request(url, requestData, headers)\n-        with urllib.request.urlopen(req) as response:\n-            with gzip.GzipFile(fileobj=response) as uncompressed:\n-                decompressedFile = uncompressed.read()\n+        response = requests.post(url, data=requestData, headers=headers)\n+        response.raise_for_status()\n+        with gzip.GzipFile(fileobj=response.content) as uncompressed:\n+            decompressedFile = uncompressed.read()\n         end = time.time()\n         logging.info(\"Retrieved in {}s\".format(end-start))\n         return  decompressedFile.decode(\"utf-8\")\n \n     def scrapeConversation(self, merge):",
+  "raw_diff": "diff --git \"a/C:\\\\Users\\\\joiso\\\\AppData\\\\Local\\\\Temp\\\\tmpat8rnrao_original.py\" \"b/C:\\\\Users\\\\joiso\\\\AppData\\\\Local\\\\Temp\\\\tmptv2fbjj1_migrado.py\"\nindex 2a1f393..437b274 100644\n--- \"a/C:\\\\Users\\\\joiso\\\\AppData\\\\Local\\\\Temp\\\\tmpat8rnrao_original.py\"\n+++ \"b/C:\\\\Users\\\\joiso\\\\AppData\\\\Local\\\\Temp\\\\tmptv2fbjj1_migrado.py\"\n@@ -1,19 +1,17 @@\n-import urllib.parse\n-import urllib.request\n+import requests\n import gzip\n import os\n import json\n import sys\n import time\n import io\n import argparse\n import configparser\n import logging\n+import urlparse\n \n-#TODO find way to merge messages if already present\n-#in order to avoid to scrape all the conversation every time\n class ConversationScraper:\n     \"\"\"Scraper that retrieves, manipulates and stores all messages belonging to a specific Faceboo conversation\"\"\"\n \n     REQUEST_WAIT = 10\n     ERROR_WAIT = 30\n@@ -56,12 +54,11 @@ class ConversationScraper:\n                      \"client\": \"web_messenger\",\n                      \"__a\": \"\",\n                      \"__dyn\": \"\",\n                      \"__req\": \"\",\n                      \"fb_dtsg\": self._fb_dtsg}\n-        data = urllib.parse.urlencode(dataForm)\n-        data = data.encode('utf-8')\n+        data = requests.utils.urlencode(dataForm)\n         return data\n \n     \"\"\"\n     POST Request all header:\n \n@@ -96,14 +93,14 @@ class ConversationScraper:\n                    \"cache-control\": \"no-cache\"}\n \n         url = \"https://www.facebook.com/ajax/mercury/thread_info.php\"\n \n         start = time.time()\n-        req = urllib.request.Request(url, requestData, headers)\n-        with urllib.request.urlopen(req) as response:\n-            with gzip.GzipFile(fileobj=response) as uncompressed:\n-                decompressedFile = uncompressed.read()\n+        response = requests.post(url, data=requestData, headers=headers)\n+        response.raise_for_status()\n+        with gzip.GzipFile(fileobj=response.content) as uncompressed:\n+            decompressedFile = uncompressed.read()\n         end = time.time()\n         logging.info(\"Retrieved in {}s\".format(end-start))\n         return  decompressedFile.decode(\"utf-8\")\n \n     def scrapeConversation(self, merge):",
   "diff": {
-    "funcoes_alteradas": [
+    "altered_functions": [
       "generateRequestData",
       "executeRequest"
     ],
-    "funcoes_adicionadas": [],
-    "funcoes_removidas": [],
-    "classes_alteradas": [
-      "ConversationScraper"
-    ],
-    "dependencias_adicionadas": [
+    "added_functions": [],
+    "removed_functions": [],
+    "altered_classes": [],
+    "added_dependencies": [
       "requests",
       "urlparse"
     ],
-    "dependencias_removidas": [
+    "removed_dependencies": [
       "urllib.parse",
       "urllib.request"
     ],
-    "resumo_impacto": "Migração de urllib para requests e ajustes na classe ConversationScraper"
+    "impact_summary": "The code has been migrated from using the `urllib.request` and `urllib.parse` modules for HTTP requests to using the `requests` library. This involved changing how POST request data is encoded (from `urllib.parse.urlencode` to `requests.utils.urlencode`) and how HTTP requests are executed (from `urllib.request.Request` and `urllib.request.urlopen` to `requests.post`). Error handling for HTTP responses was also added using `response.raise_for_status()`. The `urlparse` module was added, while `urllib.parse` and `urllib.request` were removed."
   },
-  "agentes_acionados": [
-    "semantica",
-    "seguranca",
-    "lint"
-  ],
-  "achados_semantica": [
-    "- [CONTRATO] `executeRequest` (linha 93 do migrado) — A mudança de `urllib.request` para `requests` pode alterar o comportamento de tratamento de erros e respostas. Trigger: Quando a requisição falha ou retorna um status de erro, o comportamento pode ser diferente.",
-    "- [CONTRATO] `generateRequestData` (linha 54 do migrado) — A mudança de `urllib.parse.urlencode` para `requests.utils.urlencode` pode alterar a forma como os dados são codificados. Trigger: Quando os dados contêm caracteres especiais ou não ASCII, a codificação pode ser diferente.",
-    "- [COMPAT] `executeRequest` (linha 93 do migrado) — A mudança de `urllib.request` para `requests` pode quebrar a compatibilidade com versões anteriores do Python ou bibliotecas que dependem de `urllib`. Trigger: Quando o código é executado em um ambiente com uma versão anterior do Python ou bibliotecas incompatíveis.",
-    "- [NULL] `executeRequest` (linha 93 do migrado) — A mudança de `urllib.request` para `requests` pode alterar a forma como os erros são tratados e pode não lidar corretamente com respostas nulas ou vazias. Trigger: Quando a requisição retorna uma resposta nula ou vazia, o código pode falhar ou comportar-se de forma inesperada."
-  ],
-  "achados_seguranca": [
-    "- [SURFACE] `executeRequest` (linha 93 do migrado) — Introdução de nova dependência com histórico de CVEs: a biblioteca `requests` é usada sem especificar uma versão, o que pode levar a vulnerabilidades conhecidas em versões mais antigas. Trigger: Uso de uma versão vulnerável da biblioteca `requests`.",
-    "- [SURFACE] `executeRequest` (linha 93 do migrado) — Acesso a recursos ampliado sem necessidade: a biblioteca `requests` pode permitir a execução de requisições HTTP de forma mais flexível do que a biblioteca `urllib`, o que pode aumentar a superfície de ataque. Trigger: Uso de métodos de requisição não padrão ou com parâmetros mal configurados.",
-    "- [INPUT-SEC] `generateRequestData` (linha 54 do migrado) — Falta de validação de inputs: os dados de formulário são gerados sem validação, o que pode permitir a injeção de dados maliciosos. Trigger: Injeção de dados maliciosos nos campos de formulário.",
-    "- [AUTH-LOG] `executeRequest` (linha 93 do migrado) — Ausência de redação de headers sensíveis: os headers de requisição, incluindo o token de autenticação, são logados sem redação, o que pode expor informações sensíveis. Trigger: Log de requisições com headers sensíveis.",
-    "- [SURFACE] `scrapeConversation` (linha 123 do migrado) — Uso de `os.system` para executar comandos do sistema, o que pode permitir a execução de comandos maliciosos. Trigger: Uso de `os.system` com comandos maliciosos."
-  ],
-  "achados_lint": [
-    "- Nenhum novo issue de lint/style introduzido pela migração."
-  ],
+  "agentes_acionados": [],
+  "achados_semantica": [],
+  "achados_seguranca": [],
+  "achados_lint": [],
   "iteracoes": 1,
   "deve_reprocessar": false,
-  "elapsed_s": 173.89656949043274
+  "elapsed_s": 24.023437023162842,
+  "backend": "Gemini 2.5 Flash (pesados) + Groq 8B (leves)"
 }

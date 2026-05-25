@@ -18,13 +18,15 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 from collections import Counter
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Any, Literal, TypedDict
 
 from fastapi import FastAPI, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_groq import ChatGroq
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 from pydantic import BaseModel
@@ -72,15 +74,101 @@ def _strip_md_fences(text: str) -> str:
     return text.strip()
 
 
-def _get_llm() -> ChatGroq:
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
+# Estratégia multi-LLM para balancear qualidade, custo e limites de cota:
+#
+#   NÓS LEVES   → Groq llama-3.1-8b-instant  (rápido, baixo consumo de tokens)
+#   NÓS PESADOS → Google Gemini 2.5 Flash   (raciocínio profundo, cota generosa)
+#
+# O Gemini 2.5 Flash tem limites de TPM/TPD muito maiores no free tier do que
+# os modelos Groq 70B, eliminando praticamente todos os erros 429 nos nós que
+# mais consomem tokens (semantico, segurança, critico).
+
+_MODEL_GROQ_LIGHT  = "llama-3.1-8b-instant"
+_MODEL_GEMINI_HEAVY = "gemini-2.5-flash"
+
+_LIGHT_NODES: frozenset[str] = frozenset({
+    "no_classificador", # matching de padrões no diff → lista de agentes
+    "no_lint",          # interpreta output determinístico do Ruff
+    "relatorio_final",  # consolida achados já estruturados em Markdown
+})
+
+_HEAVY_NODES: frozenset[str] = frozenset({
+    "no_parser",     # recebe o diff completo (pode ter milhares de tokens)
+    "no_semantico",  # raciocínio multi-step sobre equivalência funcional
+    "no_seguranca",  # análise de domínio em segurança
+    "no_critico",    # meta-avaliação da qualidade dos achados (reflection)
+})
+
+# Substitution of full code files in iterations 2+.
+# The raw_diff with unified=5 already contains the (-/+) lines and sufficient context;
+# resending the entire code would waste ~60% of the tokens.
+_REFINAMENTO_NOTA = (
+    "[REFINEMENT — code identical to iteration 1. "
+    "Consult the raw_diff for the changed lines and focus on the rejection_reason.]"
+)
+
+
+def _get_llm(node: str = "default") -> ChatGroq | ChatGoogleGenerativeAI:
+    """
+    Retorna o LLM adequado para cada nó, balanceando qualidade e consumo de tokens.
+
+    Nós leves  → Groq llama-3.1-8b-instant
+      • no_classificador — classificação simples de padrões no diff
+      • no_lint          — interpretação do output determinístico do Ruff
+      • relatorio_final  — consolidação de achados já estruturados
+
+    Nós pesados → Gemini 2.5 Flash (Google AI)
+      • no_parser     — recebe o diff completo (pode exceder 6k TPM do Groq)
+      • no_semantico  — raciocínio multi-step sobre equivalência funcional
+      • no_seguranca  — análise de domínio em segurança
+      • no_critico    — meta-avaliação da qualidade dos achados (reflection)
+    """
+    if node in _HEAVY_NODES:
+        if not os.getenv("GOOGLE_API_KEY"):
+            raise ValueError("GOOGLE_API_KEY não encontrada nas variáveis de ambiente.")
+        return ChatGoogleGenerativeAI(
+            model=_MODEL_GEMINI_HEAVY,
+            temperature=0.0,
+        )
+
+    if not os.getenv("GROQ_API_KEY"):
         raise ValueError("GROQ_API_KEY não encontrada nas variáveis de ambiente.")
     return ChatGroq(
-        api_key=api_key,
-        model_name="llama-3.3-70b-versatile",
+        model=_MODEL_GROQ_LIGHT,
         temperature=0.0,
     )
+
+
+def _invoke_com_retry(llm: Any, prompt: str, max_tentativas: int = 3) -> Any:
+    """
+    Invoca o LLM com retry exponencial em caso de rate limit (429/413).
+
+    Este wrapper é a rede de segurança para erros de cota que escapam das
+    estratégias primárias (Gemini para nós pesados, Groq 8B para nós leves).
+    Não adiciona latência quando não há rate limit — o sleep só ocorre após erro.
+
+    Backoff: 30s → 60s → 120s (dobrando a cada tentativa).
+    """
+    for tentativa in range(1, max_tentativas + 1):
+        try:
+            return llm.invoke(prompt)
+        except Exception as exc:
+            err = str(exc)
+            is_rate_limit = (
+                "429" in err
+                or "413" in err
+                or "rate_limit" in err.lower()
+                or "quota" in err.lower()
+                or "resource_exhausted" in err.lower()
+            )
+            if is_rate_limit and tentativa < max_tentativas:
+                wait = 30 * (2 ** (tentativa - 1))  # 30s, 60s, 120s
+                print(f"  [retry] Rate limit on LLM (attempt {tentativa}/{max_tentativas})"
+                      f" — waiting {wait}s...")
+                time.sleep(wait)
+            else:
+                raise
+    raise RuntimeError("_invoke_com_retry: max_tentativas deve ser >= 1")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -110,9 +198,14 @@ class CodeReviewState(TypedDict):
     motivo_rejeicao: str
 
     # Controle de qualidade
-    status_qualidade: str   # "" | "aprovado" | "requer_refinamento"
+    status_qualidade: str   # "" | "approved" | "requires_refinement"
     iteracao: int           # Incrementado pelo Roteador; máximo efetivo = 3
     deve_reprocessar: bool  # True = no_critico sinaliza que o migration_agent deve refazer
+
+    # Cache de iteração: evitam reenvio de código completo nas rodadas 2+
+    # Inicializados como None em _executar_grafo; preenchidos pelo no_lint na iter 1.
+    ruff_config:       dict | None   # Config Ruff inferida na iter 1
+    ruff_novos_issues: list | None   # Issues novos do Ruff na iter 1
 
     # Artefato final entregue ao humano
     relatorio_final: str
@@ -187,14 +280,14 @@ def no_parser(state: CodeReviewState) -> dict:
     """
     raw_diff = _run_git_diff(state["codigo_original"], state["codigo_migrado"])
 
-    llm = _get_llm()
+    llm = _get_llm("no_parser")
     prompt = _render(
         "parser",
         codigo_original=state["codigo_original"],
         codigo_migrado=state["codigo_migrado"],
         raw_diff=raw_diff or "(git não disponível — analise os códigos diretamente)",
     )
-    response = llm.invoke(prompt)
+    response = _invoke_com_retry(llm, prompt)
     try:
         diff = json.loads(_strip_md_fences(response.content))
     except json.JSONDecodeError:
@@ -220,19 +313,19 @@ def no_classificador(state: CodeReviewState) -> dict:
     a mais do que perder cobertura de análise.
     """
     if state["diff_estruturado"].get("parse_error"):
-        return {"agentes_acionados": ["semantica", "seguranca", "lint"]}
+        return {"agentes_acionados": ["semantics", "security", "lint"]}
 
-    llm = _get_llm()
+    llm = _get_llm("no_classificador")
     diff_str = json.dumps(state["diff_estruturado"], ensure_ascii=False, indent=2)
     prompt = _render("classificador", diff_str=diff_str)
-    response = llm.invoke(prompt)
+    response = _invoke_com_retry(llm, prompt)
     try:
         parsed = json.loads(_strip_md_fences(response.content))
-        agentes = parsed.get("agentes", ["semantica"])
+        agentes = parsed.get("agents", ["semantics"])
     except (json.JSONDecodeError, AttributeError):
-        agentes = ["semantica", "seguranca", "lint"]
+        agentes = ["semantics", "security", "lint"]
 
-    return {"agentes_acionados": agentes}
+    return {"nos_acionados": agentes}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -260,8 +353,8 @@ def _despachar_agentes(state: CodeReviewState) -> list[Send]:
     Caso a lista esteja vazia, encaminha diretamente ao Nó Crítico.
     """
     mapa_agentes = {
-        "semantica": "no_semantico",
-        "seguranca": "no_seguranca",
+        "semantics": "no_semantico",
+        "security":  "no_seguranca",
         "lint":      "no_lint",
     }
     envios = [
@@ -281,32 +374,41 @@ def no_semantico(state: CodeReviewState) -> dict:
     Analisa a equivalência semântica entre o código original e o migrado.
     Em iterações de refinamento, lê `motivo_rejeicao` para não repetir erros.
 
+    Usa Gemini 2.5 Flash: raciocínio multi-step sobre comportamento de código.
     Passa o `raw_diff` (git diff --no-index) para que o agente possa referenciar
     números de linha exatos ao reportar achados — técnica inspirada no PR-Agent
     (pr_reviewer_prompts.toml) que exige start_line/end_line em cada finding.
     """
-    llm = _get_llm()
+    llm = _get_llm("no_semantico")
     critica = (
-        f"\n⚠️  CRÍTICA DA ITERAÇÃO ANTERIOR — corrija os pontos abaixo:\n{state['motivo_rejeicao']}"
+        f"\n⚠️  FEEDBACK FROM PREVIOUS ITERATION — address the points below:\n{state['motivo_rejeicao']}"
         if state.get("motivo_rejeicao")
         else ""
     )
     diff_str = json.dumps(state["diff_estruturado"], ensure_ascii=False, indent=2)
+
+    if state.get("iteracao", 1) > 1:
+        codigo_original_ctx = _REFINAMENTO_NOTA
+        codigo_migrado_ctx  = _REFINAMENTO_NOTA
+    else:
+        codigo_original_ctx = state["codigo_original"]
+        codigo_migrado_ctx  = state["codigo_migrado"]
+
     prompt = _render(
         "agente_semantica",
         critica=critica,
         diff_str=diff_str,
         raw_diff=state.get("raw_diff") or "(git diff não disponível)",
-        codigo_original=state["codigo_original"],
-        codigo_migrado=state["codigo_migrado"],
+        codigo_original=codigo_original_ctx,
+        codigo_migrado=codigo_migrado_ctx,
     )
-    response = llm.invoke(prompt)
+    response = _invoke_com_retry(llm, prompt)
     achados = [
         linha.strip()
         for linha in response.content.split("\n")
         if linha.strip().startswith("-")
     ]
-    return {"achados_semantica": achados or ["- Sem achados semânticos relevantes."]}
+    return {"achados_semantica": achados or ["- No relevant semantic findings."]}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -318,44 +420,53 @@ def no_seguranca(state: CodeReviewState) -> dict:
     Audita riscos de segurança introduzidos pela migração.
     Em iterações de refinamento, lê `motivo_rejeicao` para refinar o foco.
 
+    Usa Gemini 2.5 Flash: análise de domínio em segurança de software.
     Passa o `raw_diff` (git diff --no-index) para que o agente referencie
     números de linha exatos — técnica do PR-Agent (pr_reviewer_prompts.toml).
     """
-    llm = _get_llm()
+    llm = _get_llm("no_seguranca")
     critica = (
-        f"\n⚠️  CRÍTICA DA ITERAÇÃO ANTERIOR — corrija os pontos abaixo:\n{state['motivo_rejeicao']}"
+        f"\n⚠️  FEEDBACK FROM PREVIOUS ITERATION — address the points below:\n{state['motivo_rejeicao']}"
         if state.get("motivo_rejeicao")
         else ""
     )
     diff_str = json.dumps(state["diff_estruturado"], ensure_ascii=False, indent=2)
+
+    if state.get("iteracao", 1) > 1:
+        codigo_original_ctx = _REFINAMENTO_NOTA
+        codigo_migrado_ctx  = _REFINAMENTO_NOTA
+    else:
+        codigo_original_ctx = state["codigo_original"]
+        codigo_migrado_ctx  = state["codigo_migrado"]
+
     prompt = _render(
         "agente_seguranca",
         critica=critica,
         diff_str=diff_str,
         raw_diff=state.get("raw_diff") or "(git diff não disponível)",
-        codigo_original=state["codigo_original"],
-        codigo_migrado=state["codigo_migrado"],
+        codigo_original=codigo_original_ctx,
+        codigo_migrado=codigo_migrado_ctx,
     )
-    response = llm.invoke(prompt)
+    response = _invoke_com_retry(llm, prompt)
     achados = [
         linha.strip()
         for linha in response.content.split("\n")
         if linha.strip().startswith("-")
     ]
-    return {"achados_seguranca": achados or ["- Sem achados de segurança relevantes."]}
+    return {"achados_seguranca": achados or ["- No relevant security findings."]}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Nó 4c – no_lint  (tool use determinístico via Ruff + interpretação LLM)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _inferir_config_ruff(codigo_original: str, llm: ChatGroq) -> dict:
+def _inferir_config_ruff(codigo_original: str, llm: ChatGroq | ChatGoogleGenerativeAI) -> dict:
     """
     Usa o LLM para inferir o estilo implícito do código original e retorna
     uma configuração Ruff ajustada (line_length, regras, indent_width).
     """
     prompt = _render("agente_lint_config", codigo_original=codigo_original)
-    response = llm.invoke(prompt)
+    response = _invoke_com_retry(llm, prompt)
     defaults = {"line_length": 88, "select": ["E", "W", "F", "I"], "ignore": [], "indent_width": 4}
     try:
         config = json.loads(_strip_md_fences(response.content))
@@ -449,42 +560,63 @@ def no_lint(state: CodeReviewState) -> dict:
     2. Ruff é executado em ambos os códigos (original e migrado) via subprocess.
     3. Filtro de regressão: isola apenas os *novos* issues introduzidos.
     4. LLM interpreta os novos issues avaliando severidade e contexto.
+
+    Usa modelo 8B: o Ruff já fez a detecção determinística; o LLM só interpreta.
     """
-    llm = _get_llm()
+    llm = _get_llm("no_lint")
 
-    # 1 – Inferir estilo e gerar config Ruff
-    ruff_config = _inferir_config_ruff(state["codigo_original"], llm)
+    iteracao = state.get("iteracao", 1)
 
-    # 2 – Executar Ruff em ambos os arquivos
-    issues_original = _run_ruff(state["codigo_original"], ruff_config)
-    issues_migrado  = _run_ruff(state["codigo_migrado"],  ruff_config)
-
-    # 3 – Filtrar apenas novos issues
-    novos_issues = _filtrar_novos_issues(issues_original, issues_migrado)
+    if iteracao > 1 and state.get("ruff_config") is not None:
+        # Iteração 2+: o código não mudou, então o Ruff produziria exatamente
+        # os mesmos resultados. Reutiliza config e issues cacheados da iter 1,
+        # poupando 2 chamadas ao Ruff + 1 chamada LLM (_inferir_config_ruff).
+        ruff_config  = state["ruff_config"]
+        novos_issues = state.get("ruff_novos_issues", [])
+    else:
+        # Iteração 1: infere estilo, roda Ruff em ambos os arquivos e filtra.
+        ruff_config     = _inferir_config_ruff(state["codigo_original"], llm)
+        issues_original = _run_ruff(state["codigo_original"], ruff_config)
+        issues_migrado  = _run_ruff(state["codigo_migrado"],  ruff_config)
+        novos_issues    = _filtrar_novos_issues(issues_original, issues_migrado)
 
     if not novos_issues:
-        return {"achados_lint": ["- Nenhum novo issue de lint/style introduzido pela migração."]}
+        return {
+            "achados_lint":      ["- No new lint/style issues introduced by the migration."],
+            "ruff_config":       ruff_config,
+            "ruff_novos_issues": novos_issues,
+        }
 
-    # 4 – LLM interpreta os novos issues (severidade + contexto)
+    # LLM interprets new issues (severity + context).
+    # In iterations 2+, codigo_migrado is not resent — the LLM focuses on the critique.
     critica = (
-        f"\n⚠️  CRÍTICA DA ITERAÇÃO ANTERIOR — corrija os pontos abaixo:\n{state['motivo_rejeicao']}"
+        f"\n⚠️  FEEDBACK FROM PREVIOUS ITERATION — address the points below:\n{state['motivo_rejeicao']}"
         if state.get("motivo_rejeicao")
         else ""
+    )
+    codigo_migrado_ctx = (
+        "[REFINEMENT — same code as iteration 1. Focus on the issues and the feedback below.]"
+        if iteracao > 1
+        else state["codigo_migrado"]
     )
     prompt = _render(
         "agente_lint_interpretacao",
         critica=critica,
         novos_issues=json.dumps(novos_issues, ensure_ascii=False, indent=2),
         estilo_inferido=json.dumps(ruff_config, ensure_ascii=False, indent=2),
-        codigo_migrado=state["codigo_migrado"],
+        codigo_migrado=codigo_migrado_ctx,
     )
-    response = llm.invoke(prompt)
+    response = _invoke_com_retry(llm, prompt)
     achados = [
         linha.strip()
         for linha in response.content.split("\n")
         if linha.strip().startswith("-")
     ]
-    return {"achados_lint": achados or ["- Nenhum novo issue relevante de lint/style identificado."]}
+    return {
+        "achados_lint":      achados or ["- No relevant new lint/style issues identified."],
+        "ruff_config":       ruff_config,
+        "ruff_novos_issues": novos_issues,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -493,29 +625,65 @@ def no_lint(state: CodeReviewState) -> dict:
 
 _MAX_ITERACOES = 3
 
+# Padrões que indicam achados de alta severidade.
+# Usa colchetes para evitar falso positivo em substrings como "P10", "P11", etc.
+_ALTA_SEVERIDADE = ("[P0]", "[P1]")
+
+
+def _tem_achado_critico(achados: list[str]) -> bool:
+    """
+    Retorna True se algum achado contém [P0] ou [P1] (com colchetes).
+    Retorna False quando todos são [P2]/[P3] ou a lista está vazia/apenas negativas.
+    """
+    return any(
+        sev in linha
+        for linha in achados
+        for sev in _ALTA_SEVERIDADE
+    )
+
 
 def no_critico(state: CodeReviewState) -> dict:
     """
     Ponto de convergência e Reflection da revisão.
 
+    - Saída antecipada: se NENHUM achado contiver [P0] ou [P1], aprova
+      imediatamente sem chamar o LLM — achados P2/P3 não justificam iterações extras.
     - Aprova se os achados forem precisos, específicos e acionáveis.
     - Rejeita com `motivo_rejeicao` se houver falsos positivos, achados vagos
-      ou redundâncias, para que os agentes refinem na próxima iteração.
+      ou redundâncias em achados [P0]/[P1], para que os agentes refinem.
     - Na iteração máxima, avalia normalmente com o LLM: se ainda rejeitar,
       sinaliza `deve_reprocessar = True` para que o migration_agent refaça a
       migração — ao invés de forçar uma aprovação sem embasamento.
+
+    Usa modelo Gemini: meta-avaliação da qualidade dos achados (raciocínio sobre raciocínio).
     """
-    llm = _get_llm()
+    todos_achados = (
+        state.get("achados_semantica", [])
+        + state.get("achados_seguranca", [])
+        + state.get("achados_lint", [])
+    )
+
+    # Early exit by severity: no LLM call needed.
+    # If there are no [P0] or [P1] findings, all findings are cosmetic (P2/P3).
+    # Additional iterations do not improve cosmetic findings — they only consume tokens.
+    if not _tem_achado_critico(todos_achados):
+        return {
+            "status_qualidade": "approved",
+            "motivo_rejeicao":  "",
+            "deve_reprocessar": False,
+        }
+
+    llm = _get_llm("no_critico")
 
     achados_str = "\n".join([
-        "### Semântica:",
-        *state.get("achados_semantica", ["(não acionado)"]),
+        "### Semantics:",
+        *state.get("achados_semantica", ["(not triggered)"]),
         "",
-        "### Segurança:",
-        *state.get("achados_seguranca", ["(não acionado)"]),
+        "### Security:",
+        *state.get("achados_seguranca", ["(not triggered)"]),
         "",
         "### Lint/Style:",
-        *state.get("achados_lint", ["(não acionado)"]),
+        *state.get("achados_lint", ["(not triggered)"]),
     ])
 
     prompt = _render(
@@ -523,20 +691,20 @@ def no_critico(state: CodeReviewState) -> dict:
         iteracao=str(state.get("iteracao", 0)),
         achados_str=achados_str,
     )
-    response = llm.invoke(prompt)
+    response = _invoke_com_retry(llm, prompt)
     try:
         resultado = json.loads(_strip_md_fences(response.content))
-        decisao = resultado.get("decisao", "aprovado")
-        motivo  = resultado.get("motivo_rejeicao", "")
+        decisao = resultado.get("decision", "approved")
+        motivo  = resultado.get("rejection_reason", "")
     except json.JSONDecodeError:
-        decisao = "aprovado"
+        decisao = "approved"
         motivo  = ""
 
-    # Iteração máxima atingida: não podemos mais fazer loop.
-    # Se o LLM ainda rejeita, sinaliza deve_reprocessar ao migration_agent.
-    if state.get("iteracao", 0) >= _MAX_ITERACOES and decisao == "requer_refinamento":
+    # Maximum iteration reached: the loop cannot continue.
+    # If the LLM still rejects, signal deve_reprocessar to the migration_agent.
+    if state.get("iteracao", 0) >= _MAX_ITERACOES and decisao == "requires_refinement":
         return {
-            "status_qualidade":  "aprovado",   # força saída do loop
+            "status_qualidade":  "approved",   # force loop exit
             "motivo_rejeicao":   motivo,
             "deve_reprocessar":  True,
         }
@@ -560,7 +728,7 @@ def _rota_pos_critico(
     - "requer_refinamento"                   → volta ao Roteador para nova rodada.
     """
     if (
-        state.get("status_qualidade") == "aprovado"
+        state.get("status_qualidade") == "approved"
         or state.get("iteracao", 0) >= _MAX_ITERACOES
     ):
         return "relatorio_final"
@@ -578,18 +746,20 @@ def no_relatorio_final(state: CodeReviewState) -> dict:
 
     Quando `deve_reprocessar = True`, antecipa um cabeçalho de alerta indicando
     que o migration_agent deve ser acionado novamente.
+
+    Usa modelo 8B: consolida achados já estruturados em Markdown.
     """
-    llm = _get_llm()
+    llm = _get_llm("relatorio_final")
 
     achados_str = "\n".join([
-        "### Semântica:",
-        *state.get("achados_semantica", ["(não acionado)"]),
+        "### Semantics:",
+        *state.get("achados_semantica", ["(not triggered)"]),
         "",
-        "### Segurança:",
-        *state.get("achados_seguranca", ["(não acionado)"]),
+        "### Security:",
+        *state.get("achados_seguranca", ["(not triggered)"]),
         "",
         "### Lint/Style:",
-        *state.get("achados_lint", ["(não acionado)"]),
+        *state.get("achados_lint", ["(not triggered)"]),
     ])
     diff_str = json.dumps(state.get("diff_estruturado", {}), ensure_ascii=False, indent=2)
 
@@ -598,15 +768,15 @@ def no_relatorio_final(state: CodeReviewState) -> dict:
         achados_str=achados_str,
         diff_str=diff_str,
     )
-    response = llm.invoke(prompt)
+    response = _invoke_com_retry(llm, prompt)
 
     conteudo = response.content
     if state.get("deve_reprocessar"):
         aviso = (
-            "# ⚠️ AÇÃO REQUERIDA: Reprocessamento pelo Migration Agent\n\n"
-            "> O no_critico avaliou **3 iterações** de refinamento e ainda identificou "
-            "problemas críticos. A migração deve ser refeita pelo **migration_agent** "
-            "antes de uma nova revisão.\n\n---\n\n"
+            "# ⚠️ ACTION REQUIRED: Reprocessing by Migration Agent\n\n"
+            "> The critical node evaluated **3 refinement iterations** and still identified "
+            "critical issues. The migration must be redone by the **migration_agent** "
+            "before a new review.\n\n---\n\n"
         )
         conteudo = aviso + conteudo
 
@@ -617,7 +787,7 @@ def no_relatorio_final(state: CodeReviewState) -> dict:
 # Montagem do Grafo
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_graph() -> StateGraph:
+def _build_graph() -> Any:
     workflow = StateGraph(CodeReviewState)
 
     # Registrar nós
@@ -695,6 +865,8 @@ def _executar_grafo(codigo_original: str, codigo_migrado: str) -> dict:
         "iteracao":          0,
         "deve_reprocessar":  False,
         "relatorio_final":   "",
+        "ruff_config":       None,
+        "ruff_novos_issues": None,
     }
     result = graph.invoke(initial_state)
     return {
