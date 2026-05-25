@@ -116,16 +116,11 @@ RULE #2 — urllib SPECIFICS (original_module)
 
 A) urllib responses are gzip-compressed.
    The original module does: gzip.GzipFile(fileobj=response).read()
-   The mock object itself is used as a file-like object by GzipFile.
-   You MUST wrap the compressed bytes in io.BytesIO and make the mock delegate to it:
-
-   import gzip, io, json
-   from unittest.mock import MagicMock, patch
+   You MUST wrap compressed bytes in io.BytesIO and delegate reads:
 
    PAYLOAD = {"key": "value"}
    compressed = gzip.compress(json.dumps(PAYLOAD).encode())
    buf = io.BytesIO(compressed)
-
    mock_resp = MagicMock()
    mock_resp.read.side_effect = buf.read
    mock_resp.readable.return_value = True
@@ -135,22 +130,26 @@ A) urllib responses are gzip-compressed.
    mock_resp.__exit__ = MagicMock(return_value=False)
 
    with patch('urllib.request.urlopen', return_value=mock_resp):
-       result = original_module.some_method(args)
+       result = original_scraper.executeRequest(original_scraper.generateRequestData())
 
-   DO NOT use mock_resp.read.return_value = compressed — GzipFile needs a real
-   file-like object whose .read() is called multiple times during decompression.
+   DO NOT use mock_resp.read.return_value = compressed — GzipFile calls .read()
+   multiple times and needs a real file-like object.
 
 B) The response_strip_chars slice (e.g. responseData[9:]) happens INSIDE
    scrapeConversation, NOT inside executeRequest.
-   executeRequest returns the raw decompressed string — do NOT apply any slice
-   to the return value of executeRequest in your tests.
-   When mocking executeRequest for scrapeConversation tests, the mock return value
+   executeRequest returns the raw decompressed string.
+   When mocking executeRequest for scrapeConversation tests, the return value
    MUST include the prefix so the internal slice produces valid JSON:
 
    PREFIX = "X" * 9   # must match response_strip_chars from module_quirks
-   mock_scraper.executeRequest = MagicMock(
-       return_value=PREFIX + json.dumps(PAYLOAD)
-   )
+   with patch.object(original_scraper, 'executeRequest',
+                     return_value=PREFIX + json.dumps(PAYLOAD)):
+       original_scraper.scrapeConversation(False)
+
+   WRONG — missing prefix, will cause JSONDecodeError inside scrapeConversation:
+   with patch.object(original_scraper, 'executeRequest',
+                     return_value=json.dumps(PAYLOAD)):   # ← NO PREFIX, WRONG
+       original_scraper.scrapeConversation(False)
 
 C) urllib errors:
    - Network error: side_effect=urllib.error.URLError("reason")
@@ -160,48 +159,64 @@ C) urllib errors:
 RULE #3 — requests SPECIFICS (migrated_module)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-A) requests decompresses gzip automatically — no gzip needed in mocks.
-   Use responses library:
+A) Use the `responses` library to mock HTTP calls.
 
-   import responses
+   CRITICAL — responses.activate MUST be used as a DECORATOR, never as a
+   context manager. `with responses.activate():` raises TypeError at runtime.
 
+   CORRECT — always use as decorator:
    @responses.activate
-   def test_migrated():
+   def test_something():
        responses.add(responses.POST, 'https://example.com/endpoint',
                      json={"key": "value"}, status=200)
-       result = migrated_module.some_method(args)
+       result = migrated_scraper.executeRequest(migrated_scraper.generateRequestData())
        assert result is not None
 
-B) requests responses have NO leading characters to strip.
-   Mock body is plain JSON — no prefix needed.
+   WRONG — never do this:
+   with responses.activate():   # ← TypeError: does not support context manager
+       ...
+
+B) requests decompresses gzip automatically — no gzip needed in mocks.
+   Mock body is plain JSON — no prefix needed for executeRequest tests.
 
 C) requests errors:
-   - Network error: side_effect=requests.exceptions.ConnectionError()
-   - Timeout:       side_effect=requests.exceptions.Timeout()
-   - HTTP error:    responses.add(..., status=404) — only raises if raise_for_status() is called
+   - Network error: responses.add(..., body=requests.exceptions.ConnectionError())
+   - Timeout:       responses.add(..., body=requests.exceptions.Timeout())
+   - HTTP error:    responses.add(..., status=404) — only raises if raise_for_status() called
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RULE #4 — WHAT TO TEST
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Good candidates (test these):
-  - generateRequestData — pure method, no mocking needed
-    NOTE: original returns bytes (urlencode+encode), migrated returns dict.
-    Do NOT assert original == migrated directly.
-    Parse original bytes with urllib.parse.parse_qs then compare values to migrated dict.
-  - executeRequest — mock the HTTP layer as shown above
-  - __init__ attribute checks
+  - generateRequestData — pure method, no mocking needed.
+
+    IMPORTANT: original returns bytes from urllib.parse.urlencode().encode().
+    migrated returns a plain dict.
+    They are NEVER directly equal — do NOT assert original_data == migrated_data.
+
+    To compare them correctly:
+      1. Parse original bytes: parsed = urllib.parse.parse_qs(original_data.decode('utf-8'))
+         parse_qs returns dict with LIST values: {'key': ['val'], 'foo': ['bar']}
+      2. Flatten to strings:   flat = {k: v[0] for k, v in parsed.items()}
+      3. Compare only keys present in BOTH (migrated may have extra keys with defaults):
+         for key in flat:
+             if key in migrated_data:
+                 assert flat[key] == str(migrated_data[key])
+
+  - executeRequest — mock the HTTP layer as shown above.
+  - __init__ attribute checks — no mocking needed.
 
 Bad candidates (skip these):
-  - scrapeConversation / main loop methods — too many filesystem side effects
-  - main() — calls sys.exit
+  - scrapeConversation / main loop methods — too many filesystem side effects.
+  - main() — calls sys.exit.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RULE #5 — CONSTRUCTOR DIFFERENCES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 The two classes WILL have different __init__ signatures.
-Read them carefully and instantiate each one with its own correct arguments.
+Read the source code carefully and instantiate each with its own correct arguments.
 Do NOT assume they share the same constructor.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -238,6 +253,7 @@ MODULE QUIRKS (facts extracted directly from the source code — trust these ove
 Use the quirks to:
 - Mock gzip correctly if original.uses_gzip is true
 - Only assert raises on HTTP errors if raises_on_http_error is true for that module
+- Use response_strip_chars to set the correct PREFIX length for scrapeConversation mocks
 - Compare generateRequestData outputs correctly based on their return types
 
 ORIGINAL CODE:
@@ -310,19 +326,19 @@ MANDATORY RULES:
    Each module writes to its own subdirectory inside tmp_path.
 
 2. Mock ONLY urllib.request.urlopen for original_module.
-   Mock ONLY the HTTP layer for migrated_module using responses library.
+   Mock ONLY the HTTP layer for migrated_module using the responses library.
 
 3. The mock response must be realistic — it must include all fields the code
    actually reads (payload, actions, timestamps, end_of_history marker, etc).
    Study the source code carefully to understand what JSON structure is expected.
 
 4. For original_module (urllib + gzip):
-   - Response must be gzip-compressed
-   - Must include the 9-char prefix that gets stripped internally
-   - Use io.BytesIO for the mock file object
+   - Response must be gzip-compressed.
+   - The raw bytes must include the N-char prefix that scrapeConversation strips
+     internally (use response_strip_chars from MODULE QUIRKS for N).
+   - Use io.BytesIO for the mock file object.
 
-   Example:
-   import gzip, io, json
+   Example (N=9):
    RESPONSE_DATA = {"payload": {"actions": [{"id": "1", "timestamp": "100"}]}, "end_of_history": True}
    raw = ("X" * 9 + json.dumps(RESPONSE_DATA)).encode()
    compressed = gzip.compress(raw)
@@ -335,31 +351,47 @@ MANDATORY RULES:
    mock_resp.__enter__ = lambda s: s
    mock_resp.__exit__ = MagicMock(return_value=False)
 
-5. For migrated_module (requests, no gzip, slice already inside executeRequest):
-   - Response body is plain JSON — no gzip, no prefix needed
-   - responses library handles the mock
+   with patch("urllib.request.urlopen", return_value=mock_resp):
+       scraper = OriginalConversationScraper(...)
+       scraper.scrapeConversation(False)
 
-   Example:
+5. For migrated_module (requests):
+   - requests decompresses gzip automatically — no gzip needed.
+   - CRITICAL: responses.activate MUST be used as a DECORATOR, never as a
+     context manager. `with responses.activate():` raises TypeError at runtime.
+
+   CORRECT:
    @responses.activate
    def test_e2e_migrated(tmp_path):
-       responses.add(responses.POST, 'https://www.facebook.com/ajax/mercury/thread_info.php',
-                     json=RESPONSE_DATA, status=200)
+       PREFIX = "X" * 9   # match response_strip_chars from MODULE QUIRKS
+       responses.add(responses.POST, 'https://example.com/endpoint',
+                     body=PREFIX + json.dumps(RESPONSE_DATA), status=200)
+       scraper = MigratedConversationScraper(...)
+       scraper.scrapeConversation(False)
+
+   WRONG — never do this:
+   with responses.activate():   # ← TypeError at runtime
+       ...
+
+   ALSO WRONG — do NOT use json= kwarg for migrated mocks that need a prefix:
+   responses.add(..., json=RESPONSE_DATA)   # ← no prefix, strip inside executeRequest
+                                             #   will produce invalid JSON
+
+   CORRECT for migrated: always use body= with the prefix string:
+   responses.add(..., body=PREFIX + json.dumps(RESPONSE_DATA), status=200)
 
 6. After both scrapers run, read the output file and compare:
-   orig_result = json.loads((tmp_path / "orig" / convID / "conversation.json").read_text())
-   mig_result  = json.loads((tmp_path / "mig"  / convID / "conversation.json").read_text())
+   orig_result = json.loads((tmp_path / "orig" / conv_id / "conversation.json").read_text())
+   mig_result  = json.loads((tmp_path / "mig"  / conv_id / "conversation.json").read_text())
    assert orig_result == mig_result
 
-7. outDir must be a STRING — the original module uses string concatenation internally.
+7. outDir must be a STRING — modules may use string concatenation internally.
    Always convert tmp_path to str before passing:
    out_dir_orig = str(tmp_path / "orig")
    out_dir_mig  = str(tmp_path / "mig")
 
-8. For migrated_module the executeRequest already strips 9 chars internally (response.text[9:]).
-   So the responses mock body MUST include 9 prefix chars so after the strip the result is valid JSON:
-   PREFIX = "X" * 9
-   responses.add(responses.POST, 'https://...', body=PREFIX + json.dumps(RESPONSE_DATA), status=200)
-   DO NOT use json=RESPONSE_DATA for migrated mocks — use body=PREFIX+json.dumps(RESPONSE_DATA).
+8. Each test function is independent — do NOT share module-level responses.add()
+   calls across tests. All responses.add() calls must be inside the decorated function.
 
 9. MANDATORY IMPORTS at top of file:
    import urllib.parse
@@ -430,6 +462,10 @@ def _validate_test_code(code: str) -> tuple[bool, str]:
     has_any_mock = bool(re.search(r"MagicMock|patch\(|@patch|responses\.", code))
     if not has_any_mock:
         return False, "No mocking found — tests would make real HTTP requests"
+
+    # Reject responses.activate() used as context manager
+    if re.search(r"with\s+responses\.activate\(\)", code):
+        return False, "responses.activate() used as context manager — use @responses.activate decorator instead"
 
     for test_name in re.findall(r"def (test_\w+)", code):
         match = re.search(

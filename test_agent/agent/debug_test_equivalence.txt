@@ -1,76 +1,154 @@
 ============================= test session starts =============================
-collecting ... collected 10 items
+collecting ... collected 5 items
 
-test_equivalence.py::test_generateRequestData_original FAILED            [ 10%]
-test_equivalence.py::test_generateRequestData_migrated PASSED            [ 20%]
-test_equivalence.py::test_executeRequest_original PASSED                 [ 30%]
-test_equivalence.py::test_executeRequest_migrated FAILED                 [ 40%]
-test_equivalence.py::test_executeRequest_original_network_error PASSED   [ 50%]
-test_equivalence.py::test_executeRequest_migrated_network_error PASSED   [ 60%]
-test_equivalence.py::test_executeRequest_original_http_error PASSED      [ 70%]
-test_equivalence.py::test_executeRequest_migrated_http_error FAILED      [ 80%]
-test_equivalence.py::test_init_original PASSED                           [ 90%]
-test_equivalence.py::test_init_migrated FAILED                           [100%]
+test_equivalence.py::test_generateRequestData PASSED                     [ 20%]
+test_equivalence.py::test_executeRequest PASSED                          [ 40%]
+test_equivalence.py::test_scrapeConversation FAILED                      [ 60%]
+test_equivalence.py::test_executeRequest_network_error PASSED            [ 80%]
+test_equivalence.py::test_executeRequest_http_error FAILED               [100%]
 
 ================================== FAILURES ===================================
-______________________ test_generateRequestData_original ______________________
+___________________________ test_scrapeConversation ___________________________
 
-    def test_generateRequestData_original():
-        scraper = OriginalConversationScraper("convID", 0, 100, "cookie", "fb_dtsg", "userID", "outDir")
-        data = scraper.generateRequestData()
-        parsed_data = urllib.parse.parse_qs(data.decode('utf-8'))
-        assert parsed_data["messages[user_ids][convID][offset]"] == ['0']
->       assert parsed_data["messages[user_ids][convID][timestamp]"] == ['']
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-E       KeyError: 'messages[user_ids][convID][timestamp]'
+    def test_scrapeConversation():
+        PAYLOAD = {"key": "value"}
+        compressed = gzip.compress(json.dumps(PAYLOAD).encode())
+        buf = io.BytesIO(compressed)
+        mock_resp = MagicMock()
+        mock_resp.read.side_effect = buf.read
+        mock_resp.readable.return_value = True
+        mock_resp.seekable.return_value = False
+        mock_resp.writable.return_value = False
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+    
+        original_scraper = OriginalConversationScraper("convID", 0, 2000, "cookie", "fb_dtsg", "userID", "outDir")
+        PREFIX = "X" * 9
+        with patch.object(original_scraper, 'executeRequest', return_value=PREFIX + json.dumps(PAYLOAD)):
+>           original_scraper.scrapeConversation(False)
 
-test_equivalence.py:19: KeyError
-________________________ test_executeRequest_migrated _________________________
+test_equivalence.py:70: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
-    def test_executeRequest_migrated():
-        scraper = MigratedConversationScraper("convID", "cookie", "fb_dtsg", "outDir")
-        with responses.RequestsMock() as rsps:
-            rsps.add(responses.POST, 'https://www.facebook.com/ajax/mercury/thread_info.php',
-                     json={"key": "value"}, status=200)
-            response = scraper.executeRequest({})
->           assert response == '{"key": "value"}'
-E           assert 'value"}' == '{"key": "value"}'
-E             
-E             - {"key": "value"}
-E             + value"}
+self = <original_module.ConversationScraper object at 0x000001DCC951BB90>
+merge = False
 
-test_equivalence.py:55: AssertionError
-___________________ test_executeRequest_migrated_http_error ___________________
+    def scrapeConversation(self, merge):
+        """Retrieves all conversation messages and stores them in a JSON file
+        If merge is specified, then new messages are merged the the previously already scraped conversation
+        """
+    
+        if not os.path.exists(self._directory):
+            if merge:
+                logging.error("Conversation not present. Merge operation not possible")
+                return
+            os.makedirs(self._directory)
+    
+        logging.info("Starting scraping of conversation {}".format(self._convID))
+    
+        messages = []
+        if merge:
+            with open(self._directory + "conversation.json") as conv:
+                convMessages = json.load(conv)
+        msgsData = ""
+        while self.CONVERSATION_ENDMARK not in msgsData:
+            reqData = self.generateRequestData()
+            #TODO remove timestamp info
+            print("Retrieving messages " + str(self._offset) + "-" + str(self._chunkSize+self._offset) + ", timestamp " + self._timestamp)
+            responseData = self.executeRequest(reqData)
+            #Remove additional leading characters
+            msgsData = responseData[9:]
+            jsonData = json.loads(msgsData)
+    
+            numMsgs = 0
+>           if jsonData and jsonData['payload']:
+                            ^^^^^^^^^^^^^^^^^^^
+E           KeyError: 'payload'
 
-    def test_executeRequest_migrated_http_error():
-        scraper = MigratedConversationScraper("convID", "cookie", "fb_dtsg", "outDir")
-        with responses.RequestsMock() as rsps:
-            rsps.add(responses.POST, 'https://www.facebook.com/ajax/mercury/thread_info.php',
-                     json={"key": "value"}, status=404)
-            response = scraper.executeRequest({})
->           assert response == '{"key": "value"}'
-E           assert 'value"}' == '{"key": "value"}'
-E             
-E             - {"key": "value"}
-E             + value"}
+original_module.py:137: KeyError
+---------------------------- Captured stdout call -----------------------------
+Retrieving messages 0-2000, timestamp 
+_______________________ test_executeRequest_http_error ________________________
 
-test_equivalence.py:94: AssertionError
-_____________________________ test_init_migrated ______________________________
+    def test_executeRequest_http_error():
+        original_scraper = OriginalConversationScraper("convID", 0, 2000, "cookie", "fb_dtsg", "userID", "outDir")
+        with patch('urllib.request.urlopen', side_effect=urllib.error.HTTPError("url", 404, "msg", {}, None)):
+>           result = original_scraper.executeRequest(original_scraper.generateRequestData())
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-    def test_init_migrated():
-        scraper = MigratedConversationScraper("convID", "cookie", "fb_dtsg", "outDir")
->       assert scraper._directory == "outDir/convID"
-E       AssertionError: assert 'outDir\\convID' == 'outDir/convID'
-E         
-E         - outDir/convID
-E         ?       ^
-E         + outDir\convID
-E         ?       ^
+test_equivalence.py:101: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
-test_equivalence.py:109: AssertionError
+self = <original_module.ConversationScraper object at 0x000001DCC95C15D0>
+requestData = b'messages%5Buser_ids%5D%5BconvID%5D%5Boffset%5D=0&messages%5Buser_ids%5D%5BconvID%5D%5Btimestamp%5D=&messages%5Buser_ids%5D%5BconvID%5D%5Blimit%5D=2000&client=web_messenger&__a=&__dyn=&__req=&fb_dtsg=fb_dtsg'
+
+    def executeRequest(self, requestData):
+        """Executes the POST request and retrieves the correspondent response content.
+        The request headers are generate here
+        :return: the response content
+        """
+        headers = {"Host": "www.facebook.com",
+                   "Origin":"http://www.facebook.com",
+                   "Referer":"https://www.facebook.com",
+                   "accept-encoding": "gzip,deflate",
+                   "accept-language": "en-US,en;q=0.8",
+                   "cookie": self._cookie,
+                   "pragma": "no-cache",
+                   "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/37.0.2062.122 Safari/537.36",
+                   "content-type": "application/x-www-form-urlencoded",
+                   "accept": "*/*",
+                   "cache-control": "no-cache"}
+    
+        url = "https://www.facebook.com/ajax/mercury/thread_info.php"
+    
+        start = time.time()
+        req = urllib.request.Request(url, requestData, headers)
+>       with urllib.request.urlopen(req) as response:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+original_module.py:102: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <MagicMock name='urlopen' id='2047782690384'>
+args = (<urllib.request.Request object at 0x000001DCC95C2A90>,), kwargs = {}
+
+    def __call__(self, /, *args, **kwargs):
+        # can't use self in-case a function / method we are mocking uses self
+        # in the signature
+        self._mock_check_sig(*args, **kwargs)
+        self._increment_mock_call(*args, **kwargs)
+>       return self._mock_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.11_3.11.2544.0_x64__qbz5n2kfra8p0\Lib\unittest\mock.py:1124: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <MagicMock name='urlopen' id='2047782690384'>
+args = (<urllib.request.Request object at 0x000001DCC95C2A90>,), kwargs = {}
+
+    def _mock_call(self, /, *args, **kwargs):
+>       return self._execute_mock_call(*args, **kwargs)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.11_3.11.2544.0_x64__qbz5n2kfra8p0\Lib\unittest\mock.py:1128: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <MagicMock name='urlopen' id='2047782690384'>
+args = (<urllib.request.Request object at 0x000001DCC95C2A90>,), kwargs = {}
+effect = <HTTPError 404: 'msg'>
+
+    def _execute_mock_call(self, /, *args, **kwargs):
+        # separate from _increment_mock_call so that awaited functions are
+        # executed separately from their call, also AsyncMock overrides this method
+    
+        effect = self.side_effect
+        if effect is not None:
+            if _is_exception(effect):
+>               raise effect
+E               urllib.error.HTTPError: HTTP Error 404: msg
+
+C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.11_3.11.2544.0_x64__qbz5n2kfra8p0\Lib\unittest\mock.py:1183: HTTPError
 =========================== short test summary info ===========================
-FAILED test_equivalence.py::test_generateRequestData_original - KeyError: 'me...
-FAILED test_equivalence.py::test_executeRequest_migrated - assert 'value"}' =...
-FAILED test_equivalence.py::test_executeRequest_migrated_http_error - assert ...
-FAILED test_equivalence.py::test_init_migrated - AssertionError: assert 'outD...
-========================= 4 failed, 6 passed in 0.38s =========================
+FAILED test_equivalence.py::test_scrapeConversation - KeyError: 'payload'
+FAILED test_equivalence.py::test_executeRequest_http_error - urllib.error.HTT...
+========================= 2 failed, 3 passed in 0.66s =========================
