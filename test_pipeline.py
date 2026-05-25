@@ -45,7 +45,7 @@ for d in [str(REPO_ROOT), str(MIGRATION_DIR), str(TEST_AGENT_DIR), str(REVIEW_AG
     if d not in sys.path:
         sys.path.insert(0, d)
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # noqa: E402
 load_dotenv(dotenv_path=REPO_ROOT / ".env", override=False)
 
 # ── Detecção de Ollama ────────────────────────────────────────────────────────
@@ -94,8 +94,8 @@ def _detectar_ollama() -> tuple[bool, str]:
             return True, llamas[0]
 
         if modelos:
-            print(f"  AVISO: Ollama está rodando mas não há modelo Llama instalado.")
-            print(f"  Execute: ollama pull llama3.1")
+            print("  AVISO: Ollama está rodando mas não há modelo Llama instalado.")
+            print("  Execute: ollama pull llama3.1")
         return False, ""
 
     except Exception:
@@ -115,10 +115,10 @@ GROQ_API_KEY = (
 
 if OLLAMA_DISPONIVEL:
     print(f"  [Ollama] Disponivel — modelo: {OLLAMA_MODEL}")
-    print(f"  Migration + Test usarao Ollama (sem rate limit)")
-    print(f"  Review usara Gemini (nos pesados) + Groq 8B (nos leves)")
+    print("  Migration + Test usarao Ollama (sem rate limit)")
+    print("  Review usara Ollama local tambem (sem rate limit, sem API keys)")
 else:
-    print(f"  [Ollama] Nao disponivel — usando Groq para todos os agentes")
+    print("  [Ollama] Nao disponivel — usando Groq para todos os agentes")
     if not GROQ_API_KEY:
         print("  ERRO: GROQ_API_KEY nao encontrada e Ollama nao esta disponivel.")
         print("  Opcoes:")
@@ -152,8 +152,7 @@ if not OLLAMA_DISPONIVEL:
         use_large = "test_agent" in stack or "agent.py" in stack
         model_name = "llama-3.3-70b-versatile" if use_large else "llama-3.1-8b-instant"
         return langchain_groq.ChatGroq(
-            api_key=GROQ_API_KEY,
-            model_name=model_name,
+            model=model_name,
             temperature=temperature,
         )
 
@@ -196,8 +195,7 @@ elif "langchain_ollama" not in sys.modules:
 
         def _make_groq_compat(model: str = "llama3", temperature: float = 0, **_kwargs):  # type: ignore[misc]
             return langchain_groq.ChatGroq(
-                api_key=GROQ_API_KEY,
-                model_name="llama-3.1-8b-instant",
+                model="llama-3.1-8b-instant",
                 temperature=temperature,
             )
 
@@ -213,7 +211,7 @@ else:
     def _ollama_com_modelo_detectado(model: str = "llama3", temperature: float = 0, **kw):  # type: ignore[misc]
         return _NativeChatOllama(model=OLLAMA_MODEL, temperature=temperature, **kw)
 
-    _ollama_mod.ChatOllama = _ollama_com_modelo_detectado  # type: ignore[attr-defined]
+    _ollama_mod.ChatOllama = _ollama_com_modelo_detectado  # type: ignore[attr-defined, misc, assignment]
 
 
 # ── Importação dinâmica dos agentes ───────────────────────────────────────────
@@ -328,16 +326,17 @@ def run_test(original_code: str, migrated_code: str) -> dict:
     evaluation      = result.get("evaluation", {})
     router_decision = result.get("router_decision", {})
     needs_revision  = router_decision.get("needs_revision", False)
-    verdict         = "NEEDS_REVISION" if needs_revision else "APPROVED"
+    decision        = "NEEDS_REVISION" if needs_revision else "APPROVED"
 
     print(f"  Decision  : {decision}")
     print(f"  Iteracoes : {result.get('iteration', 0)}")
-    print(f"  Score     : {scores.get('overall', 'N/A')}")
+    print(f"  Score     : {evaluation.get('overall', 'N/A')}")
     print(f"  Tempo     : {elapsed:.1f}s")
 
     return {
         "report": result.get("report", ""),
         "evaluation": evaluation,
+        "router_decision": router_decision,
         "decision": decision,
         "iteration": result.get("iteration", 0),
         "elapsed_s": elapsed,
@@ -355,7 +354,8 @@ def run_review(original_code: str, migrated_code: str, max_retries: int = 3) -> 
     """
     print(f"\n{'='*60}")
     print("  ETAPA 3 — REVIEW AGENT")
-    print(f"  Backend : Gemini 2.5 Flash (nos pesados) + Groq 8B (nos leves)")
+    backend_rev = f"Ollama ({OLLAMA_MODEL})" if OLLAMA_DISPONIVEL else "Gemini 2.5 Flash (nos pesados) + Groq 8B (nos leves)"
+    print(f"  Backend : {backend_rev}")
     print(f"{'='*60}")
     t0 = time.time()
 
@@ -385,8 +385,8 @@ def run_review(original_code: str, migrated_code: str, max_retries: int = 3) -> 
             is_daily_limit = "tokens per day" in err_str.lower() or "TPD" in err_str
             if is_rate_limit:
                 if is_daily_limit:
-                    print(f"\n  ATENCAO: Limite DIARIO de tokens Groq atingido.")
-                    print(f"  Aguarde reset as 00:00 UTC ou use --skip-review.")
+                    print("\n  ATENCAO: Limite DIARIO de tokens Groq atingido.")
+                    print("  Aguarde reset as 00:00 UTC ou use --skip-review.")
                     raise
                 wait = 45 * attempt
                 print(f"  Rate limit — aguardando {wait}s...")
@@ -461,7 +461,7 @@ def main():
     original_code = input_path.read_text(encoding="utf-8")
 
     print(f"\n{'#'*60}")
-    print(f"  PIPELINE DE INTEGRACAO")
+    print("  PIPELINE DE INTEGRACAO")
     print(f"  Inicio : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  Input  : {input_path}")
     print(f"  Output : {out_dir.resolve()}")
@@ -480,14 +480,12 @@ def main():
 
     while revision_loop <= MAX_REVISION_LOOPS:
 
-        # ── ETAPA: Migration ──────────────────────────────────────────────────
-        # Na primeira iteração migra do original.
-        # Nas revisões subsequentes o migrador recebe o código original + contexto
-        # das regressões detectadas pelo Router para guiar a remigração.
+        # ── ETAPA 1: Migration ────────────────────────────────────────────────
+        # Iteration 0: migrates from the original code.
+        # Subsequent iterations: migrator receives original + router suggestions.
         if revision_loop == 0:
             migration_result = run_migration(current_original, num_examples=args.examples)
         else:
-            # Passa as sugestões do Router como contexto adicional para o migrador
             suggestions = test_result.get("router_decision", {}).get("suggestions", [])
             context = (
                 "\n\nCONTEXTO DE REVISÃO (iteração {}):\n".format(revision_loop)
@@ -497,7 +495,7 @@ def main():
 
         current_migrated = migration_result["migrated_code"]
 
-        # Salva artefato da iteração
+        # Save per-iteration artifact
         suffix = f"_iter{revision_loop}" if revision_loop > 0 else ""
         (out_dir / f"migrated_code{suffix}.py").write_text(current_migrated, encoding="utf-8")
         (out_dir / f"migration_result{suffix}.json").write_text(
@@ -506,25 +504,16 @@ def main():
             encoding="utf-8",
         )
 
-    (out_dir / "migrated_code.py").write_text(migrated_code, encoding="utf-8")
-    (out_dir / "migration_result.json").write_text(
-        json.dumps(
-            {k: v for k, v in migration_result.items() if k != "migrated_code"},
-            ensure_ascii=False, indent=2,
-        ),
-        encoding="utf-8",
-    )
+        # ── ETAPA 2: Test ─────────────────────────────────────────────────────
+        if args.skip_test:
+            test_result = {"decision": "skipped"}
+            break  # skip test → go straight to review
 
-    # ── ETAPA 2: Test ─────────────────────────────────────────────────────────
-    test_result: dict = {}
-    if not args.skip_test:
-        # Se Ollama está disponível, não há rate limit — sem pausa necessária.
-        # Se estiver usando Groq, aguarda para não conflitar com a etapa 1.
         if not OLLAMA_DISPONIVEL:
             print("\n  Aguardando 10s (rate limit Groq entre etapas)...")
             time.sleep(10)
         try:
-            test_result = run_test(original_code, migrated_code)
+            test_result = run_test(original_code, current_migrated)
             if test_result.get("report"):
                 (out_dir / "test_report.md").write_text(
                     test_result["report"], encoding="utf-8"
@@ -540,17 +529,32 @@ def main():
             print(f"\n  AVISO: test_agent falhou: {exc}")
             print("  Continuando para o review_agent...")
             test_result = {"error": str(exc), "decision": "error"}
-    else:
-        print("\n  ETAPA 2 — TEST AGENT: pulada (--skip-test)")
-        test_result = {"decision": "skipped"}
+            break
 
-        if revision_loop > MAX_REVISION_LOOPS:
+        # ── Router decision ───────────────────────────────────────────────────
+        needs_revision = test_result.get("router_decision", {}).get("needs_revision", False)
+        if not needs_revision:
+            break  # test approved → exit loop
+
+        if revision_loop >= MAX_REVISION_LOOPS:
             print(f"\n  ⚠️  Limite de {MAX_REVISION_LOOPS} revisões atingido — prosseguindo para review")
             break
 
+        revision_loop += 1
         print(f"\n  🔄 Router: NEEDS_REVISION — iniciando iteração {revision_loop}/{MAX_REVISION_LOOPS}")
-        print(f"  Aguardando 15s para respeitar rate limit do Groq...")
-        time.sleep(15)
+        if not OLLAMA_DISPONIVEL:
+            print("  Aguardando 15s para respeitar rate limit do Groq...")
+            time.sleep(15)
+
+    # Save final migrated artifact (outside loop — reflects last iteration)
+    (out_dir / "migrated_code.py").write_text(current_migrated, encoding="utf-8")
+    (out_dir / "migration_result.json").write_text(
+        json.dumps(
+            {k: v for k, v in migration_result.items() if k != "migrated_code"},
+            ensure_ascii=False, indent=2,
+        ),
+        encoding="utf-8",
+    )
 
     # ── ETAPA: Review ─────────────────────────────────────────────────────────
     if not args.skip_review:
@@ -599,7 +603,7 @@ def main():
             "migration": {
                 "status": migration_result.get("status"),
                 "elapsed_s": migration_result.get("elapsed_s"),
-                "migrated_lines": len(migrated_code.splitlines()),
+                "migrated_lines": len(current_migrated.splitlines()),
                 "backend": migration_result.get("backend"),
             },
             "test": {
@@ -629,14 +633,14 @@ def main():
     )
 
     print(f"\n{'#'*60}")
-    print(f"  PIPELINE CONCLUIDO")
+    print("  PIPELINE CONCLUIDO")
     print(f"  Tempo total : {total_elapsed:.1f}s")
     print(f"  Migration   : {migration_result.get('status')}")
     print(f"  Test        : {test_result.get('decision', 'skipped')}")
     if review_result.get("error"):
         print(f"  Review          : erro — {review_result['error'][:80]}")
     elif args.skip_review:
-        print(f"  Review          : pulado")
+        print("  Review          : pulado")
     else:
         status_rev = "reprocessar" if review_result.get("deve_reprocessar") else "aprovado"
         print(f"  Review      : {status_rev}")

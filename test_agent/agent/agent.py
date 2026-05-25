@@ -16,9 +16,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import TypedDict
 
+import urllib.request as _urllib_request
+
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI  # noqa: F401 (kept for reference)
 from langchain_ollama import ChatOllama
 from langchain_groq import ChatGroq
 from langgraph.graph import END, StateGraph
@@ -30,25 +32,44 @@ load_dotenv()
 EQUIVALENCE_THRESHOLD = 90.0
 LLM_RETRY_ATTEMPTS = 3
 
-# ── LLM ───────────────────────────────────────────────────────────────────────
+# ── LLM backend detection (runs once at import time) ─────────────────────────
 
-# llm = ChatOpenAI(
-#     api_key=os.getenv("PROVIDER_API_KEY"),
-#     base_url=os.getenv("PROVIDER_BASE_URL"),
-#     model="llama-3.3-70b-versatile",
-#     temperature=0.0,
-#     max_tokens=4096,
-# )
+_OLLAMA_HOST  = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+_OLLAMA_MODEL = os.getenv("TEST_OLLAMA_MODEL", os.getenv("REVIEW_OLLAMA_MODEL", "llama3.1:8b"))
 
-# llm = ChatOllama(
-#             model="llama3",
-#             temperature=0
-#         )
-llm= ChatGroq(
-        api_key = os.getenv("API_2"),
-        model_name="llama-3.3-70b-versatile",
-        temperature=0.0
-        ) 
+
+def _detectar_ollama_test() -> tuple[bool, str]:
+    """Returns (available, model_name). 2s timeout so missing Ollama never blocks startup."""
+    try:
+        with _urllib_request.urlopen(f"{_OLLAMA_HOST}/api/tags", timeout=2) as resp:
+            data = json.loads(resp.read())
+        modelos = [m["name"] for m in data.get("models", [])]
+        if not modelos:
+            return False, ""
+        if _OLLAMA_MODEL in modelos:
+            return True, _OLLAMA_MODEL
+        match = next((m for m in modelos if m.startswith(_OLLAMA_MODEL.split(":")[0])), None)
+        return (True, match) if match else (True, modelos[0])
+    except Exception:
+        return False, ""
+
+
+_OLLAMA_DISPONIVEL, _OLLAMA_MODEL_ATIVO = _detectar_ollama_test()
+
+if _OLLAMA_DISPONIVEL:
+    print(f"  [test_agent] Ollama detected — model: {_OLLAMA_MODEL_ATIVO}")
+else:
+    print("  [test_agent] Ollama not detected — using Groq llama-3.3-70b-versatile")
+
+
+def _get_llm():
+    """Lazy LLM factory — avoids module-level ChatOllama/ChatGroq instantiation."""
+    if _OLLAMA_DISPONIVEL:
+        return ChatOllama(model=_OLLAMA_MODEL_ATIVO, base_url=_OLLAMA_HOST, temperature=0.0)
+    return ChatGroq(model="llama-3.3-70b-versatile", temperature=0.0)
+
+
+llm = _get_llm()
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 

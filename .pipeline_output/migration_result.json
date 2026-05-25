@@ -3,11 +3,10 @@
   "status": "validado",
   "messages": [
     "📝 Código recebido: 225 linhas | Padrões urllib: urllib.request, urlopen",
-    "🧠 Inferência semântica concluída e salva em: C:\\Users\\joiso\\Desktop\\agente-migracao-TALP\\inferencia.json",
-    "🔄 Migração concluída com sucesso usando Ollama (local)",
+    "🔄 Migração concluída com sucesso usando Ollama (llama3.1:8b)",
     "🔍 Validação: 4/4 critérios atendidos\n  ✓ Sem urllib legado (request/error/urlopen)\n  ✓ Com import requests\n  ✓ Sem urlopen direto\n  ✓ Código não vazio\n"
   ],
-  "inferencia_semantica": "{\n  \"intencao_principal\": \"Rastrear e armazenar mensagens de uma conversa específica no Facebook\",\n  \"resumo_comportamento\": \"O código utiliza uma classe `ConversationScraper` para realizar requisições POST ao Facebook, recuperar mensagens de uma conversa e armazená-las em um arquivo JSON. O código também permite a opção de mergear novas mensagens com uma conversa já existente.\",\n  \"entradas\": [\n    \"ID da conversa\",\n    \"Tamanho do lote de mensagens\",\n    \"Offset da conversa\",\n    \"Cookie de autenticação do Facebook\",\n    \"Token de segurança do Facebook\",\n    \"ID do usuário\",\n    \"Diretório de saída\"\n  ],\n  \"saidas\": [\n    \"Arquivo JSON com as mensagens da conversa\"\n  ],\n  \"efeitos_colaterais\": [\n    \"Requisições POST ao Facebook podem ser rastreadas\",\n    \"Mensagens podem ser armazenadas em um arquivo JSON\"\n  ],\n  \"dependencias_externas\": [\n    \"Bibliotecas `urllib` e `gzip` para realizar requisições HTTP\",\n    \"Biblioteca `json` para manipular arquivos JSON\",\n    \"Biblioteca `argparse` para parsear argumentos de linha de comando\",\n    \"Arquivo de configuração `config.ini` para armazenar dados de autenticação do Facebook\"\n  ],\n  \"riscos_migracao\": [\n    \"Requisições POST ao Facebook podem ser bloqueadas se o código não for atualizado para seguir as políticas de segurança do Facebook\",\n    \"Arquivo JSON pode ser corrompido se o código não for atualizado para lidar com erros de parsing\"\n  ],\n  \"regras_preservacao\": [\n    \"O código deve ser atualizado para seguir as políticas de segurança do Facebook\",\n    \"O código deve ser atualizado para lidar com erros de parsing de arquivos JSON\"\n  ]\n}",
-  "elapsed_s": 25.961430549621582,
-  "backend": "Groq (llama-3.1-8b-instant)"
+  "inferencia_semantica": "",
+  "elapsed_s": 104.66056799888611,
+  "backend": "Ollama (llama3.1:8b)"
 }

@@ -24,12 +24,41 @@ import openpyxl
 import os
 import json
 import re
+import urllib.request as _urllib_request
 from pathlib import Path
 from dotenv import load_dotenv
 
 
 load_dotenv()
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"), override=True)
+
+# ── LLM backend detection (runs once at import time) ─────────────────────────
+_OLLAMA_HOST  = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+_OLLAMA_MODEL = os.getenv("MIGRATION_OLLAMA_MODEL", os.getenv("REVIEW_OLLAMA_MODEL", "llama3.1:8b"))
+
+
+def _detectar_ollama() -> tuple[bool, str]:
+    """Returns (available, model_name). 2s timeout so missing Ollama never blocks startup."""
+    try:
+        with _urllib_request.urlopen(f"{_OLLAMA_HOST}/api/tags", timeout=2) as resp:
+            data = json.loads(resp.read())
+        modelos = [m["name"] for m in data.get("models", [])]
+        if not modelos:
+            return False, ""
+        if _OLLAMA_MODEL in modelos:
+            return True, _OLLAMA_MODEL
+        match = next((m for m in modelos if m.startswith(_OLLAMA_MODEL.split(":")[0])), None)
+        return (True, match) if match else (True, modelos[0])
+    except Exception:
+        return False, ""
+
+
+_OLLAMA_DISPONIVEL, _OLLAMA_MODEL_ATIVO = _detectar_ollama()
+
+if _OLLAMA_DISPONIVEL:
+    print(f"  [migration_agent] Ollama detected — model: {_OLLAMA_MODEL_ATIVO}")
+else:
+    print("  [migration_agent] Ollama not detected — using Groq llama-3.3-70b-versatile")
 # API_KEY = os.getenv("API_KEY")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 URL_MIGRATE_PATH = PROJECT_ROOT / "url-migrate.py"
@@ -209,17 +238,19 @@ def no_migrar_com_llm(estado: EstadoAgente, exemplos_treino: list[dict], prompt_
     codigo_usuario = estado["codigo_usuario"]
     
     try:
-        # Use local Ollama model for migration (no rate limits, free)
-        # model = ChatOllama(
-        #     model="llama3",
-        #     temperature=0
-        # )
-        api_key = os.getenv("GROQ_API_KEY")
-        model = ChatGroq(
-        api_key=api_key,
-        model_name="llama-3.3-70b-versatile",
-        temperature=0.0,
-        )
+        if _OLLAMA_DISPONIVEL:
+            model = ChatOllama(
+                model=_OLLAMA_MODEL_ATIVO,
+                base_url=_OLLAMA_HOST,
+                temperature=0.0,
+            )
+            backend_label = f"Ollama ({_OLLAMA_MODEL_ATIVO})"
+        else:
+            model = ChatGroq(
+                model="llama-3.3-70b-versatile",
+                temperature=0.0,
+            )
+            backend_label = "Groq (llama-3.3-70b-versatile)"
         
         # Create messages
         messages = [
@@ -253,7 +284,7 @@ Return ONLY the migrated Python code without any explanation or markdown.""")
                     break
             codigo_migrado = "\n".join(linhas[inicio:]).strip()
         
-        mensagem = "🔄 Migração concluída com sucesso usando Ollama (local)"
+        mensagem = f"🔄 Migração concluída com sucesso usando {backend_label}"
         
         return {
             "messages": [AIMessage(content=mensagem)],

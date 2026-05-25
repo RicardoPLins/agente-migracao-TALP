@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
+import urllib.request as _urllib_request
 from collections import Counter
 from pathlib import Path
 from typing import Any, Literal, TypedDict
@@ -75,29 +77,49 @@ def _strip_md_fences(text: str) -> str:
     return text.strip()
 
 
-# Estratégia multi-LLM para balancear qualidade, custo e limites de cota:
+# ── LLM backend strategy ──────────────────────────────────────────────────────
 #
-#   NÓS LEVES   → Groq llama-3.1-8b-instant  (rápido, baixo consumo de tokens)
-#   NÓS PESADOS → Google Gemini 2.5 Flash   (raciocínio profundo, cota generosa)
+# Priority 1 — Ollama (local):   zero cost, zero rate limits, zero API keys.
+#   All nodes use the same local model configured via REVIEW_OLLAMA_MODEL.
 #
-# O Gemini 2.5 Flash tem limites de TPM/TPD muito maiores no free tier do que
-# os modelos Groq 70B, eliminando praticamente todos os erros 429 nos nós que
-# mais consomem tokens (semantico, segurança, critico).
+# Priority 2 — Cloud fallback (when Ollama is not running):
+#   Light nodes  → Groq llama-3.1-8b-instant  (fast, low token consumption)
+#   Heavy nodes  → Google Gemini 2.5 Flash     (deep reasoning, generous quota)
+#
+# Detection runs once at startup; no overhead per node call.
 
-_MODEL_GROQ_LIGHT  = "llama-3.1-8b-instant"
+_MODEL_GROQ_LIGHT   = "llama-3.1-8b-instant"
 _MODEL_GEMINI_HEAVY = "gemini-2.5-flash"
+_OLLAMA_HOST        = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+
+# Two-tier Ollama strategy: heavy nodes get a larger/code-specific model,
+# light nodes get a smaller/faster model.
+# Override via env vars:
+#   REVIEW_OLLAMA_MODEL_HEAVY=qwen2.5-coder:14b  (parser, semantic, security, critic)
+#   REVIEW_OLLAMA_MODEL_LIGHT=qwen2.5-coder:3b   (classifier, lint, report)
+# Single-model fallback: REVIEW_OLLAMA_MODEL applies to all nodes.
+_MODEL_OLLAMA_HEAVY = os.getenv(
+    "REVIEW_OLLAMA_MODEL_HEAVY",
+    os.getenv("REVIEW_OLLAMA_MODEL", "llama3.1:8b"),
+)
+_MODEL_OLLAMA_LIGHT = os.getenv(
+    "REVIEW_OLLAMA_MODEL_LIGHT",
+    os.getenv("REVIEW_OLLAMA_MODEL", "llama3.1:8b"),
+)
+# Legacy alias — still used by _detectar_ollama_local to verify availability
+_MODEL_OLLAMA = _MODEL_OLLAMA_HEAVY
 
 _LIGHT_NODES: frozenset[str] = frozenset({
-    "no_classificador", # matching de padrões no diff → lista de agentes
-    "no_lint",          # interpreta output determinístico do Ruff
-    "relatorio_final",  # consolida achados já estruturados em Markdown
+    "no_classificador",  # diff pattern matching → agent list
+    "no_lint",           # interprets deterministic Ruff output
+    "relatorio_final",   # consolidates already-structured findings into Markdown
 })
 
 _HEAVY_NODES: frozenset[str] = frozenset({
-    "no_parser",     # recebe o diff completo (pode ter milhares de tokens)
-    "no_semantico",  # raciocínio multi-step sobre equivalência funcional
-    "no_seguranca",  # análise de domínio em segurança
-    "no_critico",    # meta-avaliação da qualidade dos achados (reflection)
+    "no_parser",     # receives the full diff (can have thousands of tokens)
+    "no_semantico",  # multi-step reasoning about functional equivalence
+    "no_seguranca",  # security domain analysis
+    "no_critico",    # meta-evaluation of finding quality (reflection)
 })
 
 # Substitution of full code files in iterations 2+.
@@ -108,32 +130,99 @@ _REFINAMENTO_NOTA = (
     "Consult the raw_diff for the changed lines and focus on the rejection_reason.]"
 )
 
+# Regex that matches findings in the standardized format:
+#   - [PREFIX][Px] `symbol` (line N) — description. Trigger: ...
+# Also accepts the canonical "no findings" lines produced by each agent.
+_PADRAO_ACHADO = re.compile(r"^-\s*\[")
 
-def _get_llm(node: str = "default") -> ChatGroq | ChatGoogleGenerativeAI:
+
+def _resolver_modelo_ollama(desejado: str, disponiveis: list[str]) -> str:
     """
-    Retorna o LLM adequado para cada nó, balanceando qualidade e consumo de tokens.
-
-    Nós leves  → Groq llama-3.1-8b-instant
-      • no_classificador — classificação simples de padrões no diff
-      • no_lint          — interpretação do output determinístico do Ruff
-      • relatorio_final  — consolidação de achados já estruturados
-
-    Nós pesados → Gemini 2.5 Flash (Google AI)
-      • no_parser     — recebe o diff completo (pode exceder 6k TPM do Groq)
-      • no_semantico  — raciocínio multi-step sobre equivalência funcional
-      • no_seguranca  — análise de domínio em segurança
-      • no_critico    — meta-avaliação da qualidade dos achados (reflection)
+    Resolves the best available Ollama model for a requested model name.
+    Priority: exact match → prefix match → first available.
     """
+    if desejado in disponiveis:
+        return desejado
+    match = next((m for m in disponiveis if m.startswith(desejado.split(":")[0])), None)
+    if match:
+        return match
+    return disponiveis[0]
+
+
+def _detectar_ollama_local() -> tuple[bool, str, str]:
+    """
+    Checks once at startup whether Ollama is running and resolves both
+    the heavy and light model names against what is actually installed.
+    Returns (available, heavy_model, light_model).
+    Uses a 2s timeout so a missing Ollama service never blocks startup.
+    """
+    try:
+        url = f"{_OLLAMA_HOST}/api/tags"
+        with _urllib_request.urlopen(url, timeout=2) as resp:
+            data = json.loads(resp.read())
+        modelos = [m["name"] for m in data.get("models", [])]
+        if not modelos:
+            return False, "", ""
+
+        heavy = _resolver_modelo_ollama(_MODEL_OLLAMA_HEAVY, modelos)
+        light = _resolver_modelo_ollama(_MODEL_OLLAMA_LIGHT, modelos)
+        return True, heavy, light
+    except Exception:
+        return False, "", ""
+
+
+# Module-level detection — runs once when the module is imported.
+_OLLAMA_DISPONIVEL, _OLLAMA_HEAVY_ATIVO, _OLLAMA_LIGHT_ATIVO = _detectar_ollama_local()
+
+if _OLLAMA_DISPONIVEL:
+    if _OLLAMA_HEAVY_ATIVO == _OLLAMA_LIGHT_ATIVO:
+        print(f"  [review_agent] Ollama detected — single model: {_OLLAMA_HEAVY_ATIVO}")
+    else:
+        print(f"  [review_agent] Ollama detected — heavy: {_OLLAMA_HEAVY_ATIVO} / light: {_OLLAMA_LIGHT_ATIVO}")
+else:
+    print("  [review_agent] Ollama not detected — using Gemini (heavy) + Groq (light)")
+
+
+def _get_llm(node: str = "default") -> ChatOllama | ChatGroq | ChatGoogleGenerativeAI:
+    """
+    Returns the appropriate LLM for the given node.
+
+    When Ollama is running locally — two-tier strategy:
+      Heavy nodes → REVIEW_OLLAMA_MODEL_HEAVY (default: llama3.1:8b)
+        • no_parser, no_semantico, no_seguranca, no_critico
+        Recommended: qwen2.5-coder:14b or qwen2.5-coder:32b
+      Light nodes → REVIEW_OLLAMA_MODEL_LIGHT (default: same as heavy)
+        • no_classificador, no_lint, relatorio_final
+        Recommended: qwen2.5-coder:3b or llama3.2:3b
+
+    When Ollama is unavailable (cloud fallback):
+      Heavy nodes  → Gemini 2.5 Flash   (deep reasoning, generous quota)
+      Light nodes  → Groq llama-3.1-8b  (fast, low token consumption)
+    """
+    if _OLLAMA_DISPONIVEL:
+        ollama_model = (
+            _OLLAMA_HEAVY_ATIVO if node in _HEAVY_NODES else _OLLAMA_LIGHT_ATIVO
+        )
+        return ChatOllama(
+            model=ollama_model,
+            base_url=_OLLAMA_HOST,
+            temperature=0.0,
+        )
+
     if node in _HEAVY_NODES:
         if not os.getenv("GOOGLE_API_KEY"):
-            raise ValueError("GOOGLE_API_KEY não encontrada nas variáveis de ambiente.")
+            raise ValueError(
+                "GOOGLE_API_KEY not found. Either start Ollama or set this env var."
+            )
         return ChatGoogleGenerativeAI(
             model=_MODEL_GEMINI_HEAVY,
             temperature=0.0,
         )
 
     if not os.getenv("GROQ_API_KEY"):
-        raise ValueError("GROQ_API_KEY não encontrada nas variáveis de ambiente.")
+        raise ValueError(
+            "GROQ_API_KEY not found. Either start Ollama or set this env var."
+        )
     return ChatGroq(
         model=_MODEL_GROQ_LIGHT,
         temperature=0.0,
@@ -208,6 +297,10 @@ class CodeReviewState(TypedDict):
     ruff_config:       dict | None   # Config Ruff inferida na iter 1
     ruff_novos_issues: list | None   # Issues novos do Ruff na iter 1
 
+    # Histórico de achados por iteração (preenchido pelo no_roteador antes de limpar)
+    # Lista de dicts: [{"iteracao": N, "semantica": [...], "seguranca": [...], "lint": [...]}]
+    historico_achados: list
+
     # Artefato final entregue ao humano
     relatorio_final: str
 
@@ -272,22 +365,30 @@ def no_parser(state: CodeReviewState) -> dict:
     o impacto (funções/classes adicionadas, alteradas ou removidas).
 
     Pipeline interno:
-    1. `git diff --no-index` gera o diff exato e determinístico entre os dois
-       arquivos (sem alucinações de LLM na identificação das mudanças).
-    2. O LLM recebe o diff como fonte primária e extrai o JSON estruturado,
-       usando os códigos completos apenas como contexto semântico adicional.
-    3. Fallback: se git não estiver disponível, o LLM compara os códigos
-       diretamente (comportamento anterior).
+    1. `git diff --no-index` gera o diff exato e determinístico (zero tokens).
+    2. O LLM recebe APENAS o raw_diff como entrada — os códigos completos
+       não são enviados, reduzindo o consumo de tokens em ~60%.
+    3. Fallback: se git não estiver disponível, os códigos são embutidos
+       diretamente no campo raw_diff para análise pelo LLM.
     """
     raw_diff = _run_git_diff(state["codigo_original"], state["codigo_migrado"])
 
+    if raw_diff:
+        raw_diff_para_prompt = raw_diff
+    else:
+        # Git unavailable: embed full code in diff context so the LLM can still
+        # compare the files. The prompt variable name stays the same.
+        raw_diff_para_prompt = (
+            "(git not available — compare the two code listings below directly)\n\n"
+            "### ORIGINAL CODE:\n```python\n"
+            + state["codigo_original"]
+            + "\n```\n\n### MIGRATED CODE:\n```python\n"
+            + state["codigo_migrado"]
+            + "\n```"
+        )
+
     llm = _get_llm("no_parser")
-    prompt = _render(
-        "parser",
-        codigo_original=state["codigo_original"],
-        codigo_migrado=state["codigo_migrado"],
-        raw_diff=raw_diff or "(git não disponível — analise os códigos diretamente)",
-    )
+    prompt = _render("parser", raw_diff=raw_diff_para_prompt)
     response = _invoke_com_retry(llm, prompt)
     try:
         diff = json.loads(_strip_md_fences(response.content))
@@ -295,7 +396,7 @@ def no_parser(state: CodeReviewState) -> dict:
         diff = {"raw": response.content, "parse_error": True}
 
     return {
-        "raw_diff":        raw_diff or "",
+        "raw_diff":         raw_diff or "",
         "diff_estruturado": diff,
     }
 
@@ -309,24 +410,73 @@ def no_classificador(state: CodeReviewState) -> dict:
     Lê o diff estruturado e decide quais agentes especialistas devem ser
     acionados, preenchendo `agentes_acionados`.
 
-    Fallback seguro: se o Parser retornou parse_error (diff inválido),
-    aciona todos os agentes sem consultar o LLM — melhor gastar tokens
-    a mais do que perder cobertura de análise.
+    Quando o parser retorna parse_error:
+    1. Tenta recuperar o JSON da resposta bruta usando regex.
+    2. Se a recuperação falhar mas raw_diff estiver disponível, usa o LLM
+       para classificar diretamente a partir do raw_diff.
+    3. Se nenhuma das estratégias funcionar, interrompe com RuntimeError
+       informativo — sem análise parcial silenciosa.
     """
-    if state["diff_estruturado"].get("parse_error"):
-        return {"agentes_acionados": ["semantics", "security", "lint"]}
+    diff = state["diff_estruturado"]
 
-    llm = _get_llm("no_classificador")
-    diff_str = json.dumps(state["diff_estruturado"], ensure_ascii=False, indent=2)
-    prompt = _render("classificador", diff_str=diff_str)
-    response = _invoke_com_retry(llm, prompt)
+    if diff.get("parse_error"):
+        raw_response = diff.get("raw", "")
+        raw_diff     = state.get("raw_diff", "")
+
+        # Strategy 1: try to recover a valid JSON from the raw LLM response.
+        if raw_response:
+            json_match = re.search(
+                r'\{[^{}]*"altered_functions"[^{}]*\}', raw_response, re.DOTALL
+            )
+            if json_match:
+                try:
+                    recovered = json.loads(json_match.group())
+                    diff_str  = json.dumps(recovered, ensure_ascii=False, indent=2)
+                    llm       = _get_llm("no_classificador")
+                    response  = _invoke_com_retry(llm, _render("classificador", diff_str=diff_str))
+                    agentes   = json.loads(_strip_md_fences(response.content)).get("agents", ["semantics", "security", "lint"])
+                    print(f"  [no_classificador] Parser JSON recovered — triggering: {agentes}")
+                    return {"agentes_acionados": agentes}
+                except Exception:
+                    pass  # fall through to strategy 2
+
+        # Strategy 2: classify based on raw_diff (still deterministic, no code needed).
+        if raw_diff:
+            print(
+                "  [no_classificador] WARNING: parser produced invalid JSON. "
+                f"Raw response preview: {raw_response[:120] if raw_response else '(empty)'}. "
+                "Attempting classification from raw_diff."
+            )
+            llm      = _get_llm("no_classificador")
+            fallback = json.dumps({"parse_error": True, "raw_diff_preview": raw_diff[:800]},
+                                  ensure_ascii=False, indent=2)
+            try:
+                response = _invoke_com_retry(llm, _render("classificador", diff_str=fallback))
+                agentes  = json.loads(_strip_md_fences(response.content)).get("agents", ["semantics", "security", "lint"])
+                return {"agentes_acionados": agentes}
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Classifier recovery also failed: {exc}. "
+                    f"Parser raw response: {raw_response[:200] if raw_response else '(empty)'}."
+                ) from exc
+
+        # Strategy 3: nothing works — interrupt with an informative error.
+        raise RuntimeError(
+            "Parser produced an invalid structured diff AND git diff is unavailable. "
+            "Ensure git is installed and the input code is valid Python. "
+            f"Parser raw response: {raw_response[:200] if raw_response else '(empty)'}."
+        )
+
+    llm      = _get_llm("no_classificador")
+    diff_str = json.dumps(diff, ensure_ascii=False, indent=2)
+    response = _invoke_com_retry(llm, _render("classificador", diff_str=diff_str))
     try:
-        parsed = json.loads(_strip_md_fences(response.content))
+        parsed  = json.loads(_strip_md_fences(response.content))
         agentes = parsed.get("agents", ["semantics"])
     except (json.JSONDecodeError, AttributeError):
         agentes = ["semantics", "security", "lint"]
 
-    return {"nos_acionados": agentes}
+    return {"agentes_acionados": agentes}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -336,14 +486,30 @@ def no_classificador(state: CodeReviewState) -> dict:
 def no_roteador(state: CodeReviewState) -> dict:
     """
     Prepara o estado para uma nova rodada de análise:
+    - Salva os achados da iteração atual em `historico_achados` antes de limpar.
     - Incrementa o contador de iteração.
     - Limpa os achados anteriores para evitar acúmulo entre rodadas.
+
+    O histórico permite que o relatório final e inspeções externas comparem
+    como os achados evoluíram a cada iteração do reflection loop.
     """
+    iteracao_atual = state.get("iteracao", 0)
+
+    historico = list(state.get("historico_achados", []))
+    if iteracao_atual > 0:
+        historico.append({
+            "iteracao":          iteracao_atual,
+            "achados_semantica": list(state.get("achados_semantica", [])),
+            "achados_seguranca": list(state.get("achados_seguranca", [])),
+            "achados_lint":      list(state.get("achados_lint", [])),
+        })
+
     return {
-        "iteracao": state.get("iteracao", 0) + 1,
+        "iteracao":          iteracao_atual + 1,
+        "historico_achados": historico,
         "achados_semantica": [],
         "achados_seguranca": [],
-        "achados_lint": [],
+        "achados_lint":      [],
     }
 
 
@@ -373,12 +539,13 @@ def _despachar_agentes(state: CodeReviewState) -> list[Send]:
 def no_semantico(state: CodeReviewState) -> dict:
     """
     Analisa a equivalência semântica entre o código original e o migrado.
-    Em iterações de refinamento, lê `motivo_rejeicao` para não repetir erros.
 
-    Usa Gemini 2.5 Flash: raciocínio multi-step sobre comportamento de código.
-    Passa o `raw_diff` (git diff --no-index) para que o agente possa referenciar
-    números de linha exatos ao reportar achados — técnica inspirada no PR-Agent
-    (pr_reviewer_prompts.toml) que exige start_line/end_line em cada finding.
+    Recebe APENAS o diff estruturado (JSON) e o raw_diff (git) — os códigos
+    completos nunca são enviados, economizando tokens em todas as iterações.
+    O raw_diff fornece números de linha exatos por achado (técnica PR-Agent).
+    Em iterações de refinamento, inclui `motivo_rejeicao` para refinar o foco.
+
+    Usa Gemini 2.5 Flash: raciocínio multi-step sobre equivalência funcional.
     """
     llm = _get_llm("no_semantico")
     critica = (
@@ -388,28 +555,19 @@ def no_semantico(state: CodeReviewState) -> dict:
     )
     diff_str = json.dumps(state["diff_estruturado"], ensure_ascii=False, indent=2)
 
-    if state.get("iteracao", 1) > 1:
-        codigo_original_ctx = _REFINAMENTO_NOTA
-        codigo_migrado_ctx  = _REFINAMENTO_NOTA
-    else:
-        codigo_original_ctx = state["codigo_original"]
-        codigo_migrado_ctx  = state["codigo_migrado"]
-
     prompt = _render(
         "agente_semantica",
         critica=critica,
         diff_str=diff_str,
-        raw_diff=state.get("raw_diff") or "(git diff não disponível)",
-        codigo_original=codigo_original_ctx,
-        codigo_migrado=codigo_migrado_ctx,
+        raw_diff=state.get("raw_diff") or "(git diff not available)",
     )
     response = _invoke_com_retry(llm, prompt)
     achados = [
         linha.strip()
         for linha in response.content.split("\n")
-        if linha.strip().startswith("-")
+        if _PADRAO_ACHADO.match(linha.strip())
     ]
-    return {"achados_semantica": achados or ["- No relevant semantic findings."]}
+    return {"achados_semantica": achados or ["- [INFO][P3] No relevant semantic findings."]}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -419,11 +577,13 @@ def no_semantico(state: CodeReviewState) -> dict:
 def no_seguranca(state: CodeReviewState) -> dict:
     """
     Audita riscos de segurança introduzidos pela migração.
-    Em iterações de refinamento, lê `motivo_rejeicao` para refinar o foco.
+
+    Recebe APENAS o diff estruturado (JSON) e o raw_diff — os códigos completos
+    nunca são enviados em nenhuma iteração.
+    O raw_diff fornece números de linha exatos por achado (técnica PR-Agent).
+    Em iterações de refinamento, inclui `motivo_rejeicao` para refinar o foco.
 
     Usa Gemini 2.5 Flash: análise de domínio em segurança de software.
-    Passa o `raw_diff` (git diff --no-index) para que o agente referencie
-    números de linha exatos — técnica do PR-Agent (pr_reviewer_prompts.toml).
     """
     llm = _get_llm("no_seguranca")
     critica = (
@@ -433,52 +593,58 @@ def no_seguranca(state: CodeReviewState) -> dict:
     )
     diff_str = json.dumps(state["diff_estruturado"], ensure_ascii=False, indent=2)
 
-    if state.get("iteracao", 1) > 1:
-        codigo_original_ctx = _REFINAMENTO_NOTA
-        codigo_migrado_ctx  = _REFINAMENTO_NOTA
-    else:
-        codigo_original_ctx = state["codigo_original"]
-        codigo_migrado_ctx  = state["codigo_migrado"]
-
     prompt = _render(
         "agente_seguranca",
         critica=critica,
         diff_str=diff_str,
-        raw_diff=state.get("raw_diff") or "(git diff não disponível)",
-        codigo_original=codigo_original_ctx,
-        codigo_migrado=codigo_migrado_ctx,
+        raw_diff=state.get("raw_diff") or "(git diff not available)",
     )
     response = _invoke_com_retry(llm, prompt)
     achados = [
         linha.strip()
         for linha in response.content.split("\n")
-        if linha.strip().startswith("-")
+        if _PADRAO_ACHADO.match(linha.strip())
     ]
-    return {"achados_seguranca": achados or ["- No relevant security findings."]}
+    return {"achados_seguranca": achados or ["- [INFO][P3] No relevant security findings."]}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Nó 4c – no_lint  (tool use determinístico via Ruff + interpretação LLM)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _inferir_config_ruff(codigo_original: str, llm: ChatGroq | ChatGoogleGenerativeAI) -> dict:
+# Rules that must always be active regardless of what the LLM infers from the original code.
+# F401 — unused imports (catches leftover imports after migration removes the usage)
+# B006 — mutable default arguments (common migration mistake)
+# S603/S605/S607 — subprocess/os.system with dynamic arguments (shell injection)
+_RUFF_MANDATORY_RULES: frozenset[str] = frozenset({"F401", "B006", "S603", "S605", "S607"})
+
+
+def _inferir_config_ruff(codigo_original: str, llm: ChatOllama | ChatGroq | ChatGoogleGenerativeAI) -> dict:
     """
     Usa o LLM para inferir o estilo implícito do código original e retorna
     uma configuração Ruff ajustada (line_length, regras, indent_width).
+
+    O conjunto de regras retornado pelo LLM é complementado com
+    _RUFF_MANDATORY_RULES que nunca podem ser omitidas, independente do estilo
+    inferido (ex: F401 para imports órfãos, S605 para injeção via os.system).
     """
     prompt = _render("agente_lint_config", codigo_original=codigo_original)
     response = _invoke_com_retry(llm, prompt)
     defaults = {"line_length": 88, "select": ["E", "W", "F", "I"], "ignore": [], "indent_width": 4}
     try:
         config = json.loads(_strip_md_fences(response.content))
+        llm_select = config.get("select", defaults["select"])
+        # Merge LLM-inferred rules with mandatory rules — LLM cannot opt out of these.
+        merged_select = sorted(set(llm_select) | _RUFF_MANDATORY_RULES)
         return {
             "line_length":  int(config.get("line_length", defaults["line_length"])),
-            "select":       config.get("select", defaults["select"]),
+            "select":       merged_select,
             "ignore":       config.get("ignore", defaults["ignore"]),
             "indent_width": int(config.get("indent_width", defaults["indent_width"])),
         }
     except (json.JSONDecodeError, ValueError, TypeError):
-        return defaults
+        merged_defaults = sorted(set(defaults["select"]) | _RUFF_MANDATORY_RULES)
+        return {**defaults, "select": merged_defaults}
 
 
 def _run_ruff(code_str: str, config: dict) -> list[dict]:
@@ -562,6 +728,9 @@ def no_lint(state: CodeReviewState) -> dict:
     3. Filtro de regressão: isola apenas os *novos* issues introduzidos.
     4. LLM interpreta os novos issues avaliando severidade e contexto.
 
+    Achados são validados com _PADRAO_ACHADO para garantir o formato padronizado:
+      - [BLOCKER][P0] / [WARNING][P2] / [COSMETIC][P3] `symbol` (line N) — desc.
+
     Usa modelo 8B: o Ruff já fez a detecção determinística; o LLM só interpreta.
     """
     llm = _get_llm("no_lint")
@@ -611,10 +780,10 @@ def no_lint(state: CodeReviewState) -> dict:
     achados = [
         linha.strip()
         for linha in response.content.split("\n")
-        if linha.strip().startswith("-")
+        if _PADRAO_ACHADO.match(linha.strip())
     ]
     return {
-        "achados_lint":      achados or ["- No relevant new lint/style issues identified."],
+        "achados_lint":      achados or ["- [INFO][P3] No relevant new lint/style issues identified."],
         "ruff_config":       ruff_config,
         "ruff_novos_issues": novos_issues,
     }
@@ -745,6 +914,10 @@ def no_relatorio_final(state: CodeReviewState) -> dict:
     Consolida todos os achados validados em um relatório Markdown estruturado.
     A IA NÃO corrige o código — apenas reporta e orienta.
 
+    O relatório segue um template rígido definido em relatorio_final.json com
+    seções obrigatórias: Summary, Findings by Severity, Details, Verdict.
+    Achados do histórico de iterações são incluídos quando há mais de 1 rodada.
+
     Quando `deve_reprocessar = True`, antecipa um cabeçalho de alerta indicando
     que o migration_agent deve ser acionado novamente.
 
@@ -762,12 +935,25 @@ def no_relatorio_final(state: CodeReviewState) -> dict:
         "### Lint/Style:",
         *state.get("achados_lint", ["(not triggered)"]),
     ])
-    diff_str = json.dumps(state.get("diff_estruturado", {}), ensure_ascii=False, indent=2)
+    diff_str      = json.dumps(state.get("diff_estruturado", {}), ensure_ascii=False, indent=2)
+    historico     = state.get("historico_achados", [])
+    hist_str      = json.dumps(historico, ensure_ascii=False, indent=2) if historico else "[]"
+    total_iters   = str(state.get("iteracao", 1))
+    deve_reprocess = state.get("deve_reprocessar", False)
+    verdict_hint  = (
+        "FORCED VERDICT: ❌ REQUIRES CORRECTIONS — the reflection loop exhausted 3 iterations "
+        "and still found unresolved issues. The migration_agent must redo the migration."
+        if deve_reprocess
+        else "Determine the verdict based on the findings above."
+    )
 
     prompt = _render(
         "relatorio_final",
         achados_str=achados_str,
         diff_str=diff_str,
+        historico_str=hist_str,
+        total_iteracoes=total_iters,
+        verdict_hint=verdict_hint,
     )
     response = _invoke_com_retry(llm, prompt)
 
@@ -868,18 +1054,20 @@ def _executar_grafo(codigo_original: str, codigo_migrado: str) -> dict:
         "relatorio_final":   "",
         "ruff_config":       None,
         "ruff_novos_issues": None,
+        "historico_achados": [],
     }
     result = graph.invoke(initial_state)
     return {
-        "raw_diff":          result.get("raw_diff", ""),
-        "diff":              result.get("diff_estruturado", {}),
-        "agentes_acionados": result.get("agentes_acionados", []),
-        "achados_semantica": result.get("achados_semantica", []),
-        "achados_seguranca": result.get("achados_seguranca", []),
-        "achados_lint":      result.get("achados_lint", []),
-        "iteracoes":         result.get("iteracao", 0),
-        "deve_reprocessar":  result.get("deve_reprocessar", False),
-        "relatorio_final":   result.get("relatorio_final", ""),
+        "raw_diff":           result.get("raw_diff", ""),
+        "diff":               result.get("diff_estruturado", {}),
+        "agentes_acionados":  result.get("agentes_acionados", []),
+        "achados_semantica":  result.get("achados_semantica", []),
+        "achados_seguranca":  result.get("achados_seguranca", []),
+        "achados_lint":       result.get("achados_lint", []),
+        "iteracoes":          result.get("iteracao", 0),
+        "historico_achados":  result.get("historico_achados", []),
+        "deve_reprocessar":   result.get("deve_reprocessar", False),
+        "relatorio_final":    result.get("relatorio_final", ""),
     }
 
 

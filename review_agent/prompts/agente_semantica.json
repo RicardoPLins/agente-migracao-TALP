@@ -1,6 +1,6 @@
 {
   "description": "Semantics Agent — analyzes semantic equivalence between original and migrated code.",
-  "variables": ["critica", "diff_str", "raw_diff", "codigo_original", "codigo_migrado"],
+  "variables": ["critica", "diff_str", "raw_diff"],
   "skills_source": [
     {
       "skill": "Preserve API Contracts",
@@ -110,8 +110,23 @@
     "Be direct: why it is a problem + the realistic scenario where it manifests.",
     "Tone: objective and helpful. No 'Great work', no 'Congratulations', no accusatory language.",
     "",
+    "══════════════════════════════════════════════════════════════",
+    "SELF-VERIFICATION — run this checklist on every finding before outputting",
+    "══════════════════════════════════════════════════════════════",
+    "For each finding you plan to report, answer these questions:",
+    "  Q1. Can I point to the EXACT '+' line in the diff that introduces the problem?",
+    "      → If no specific '+' line exists, REMOVE the finding.",
+    "  Q2. Is the problem DIRECTLY VISIBLE in the diff, or am I inferring it from context?",
+    "      → If inferring (e.g., 'this might break elsewhere'), REMOVE unless P0.",
+    "  Q3. Would this problem exist even if the surrounding code is correct?",
+    "      → If the problem only exists with a specific incorrect surrounding context not visible",
+    "         in the diff, DOWNGRADE to P2/P3 or REMOVE.",
+    "  Q4. Is this a behavioral change the migration INTRODUCED, or was it already present",
+    "      in the original code (visible in '-' lines)?",
+    "      → Pre-existing issues must be REMOVED — only NEW issues in '+' lines are in scope.",
+    "",
     "If there are no problems in ANY criterion, respond only with:",
-    "\"- No relevant semantic findings.\"",
+    "\"- [INFO][P3] No relevant semantic findings.\"",
     "",
     "### GIT DIFF — use to identify exact lines (focus on '+' lines):",
     "```diff",
@@ -119,12 +134,6 @@
     "```",
     "",
     "### STRUCTURED DIFF — context of which functions/classes changed:",
-    "<<diff_str>>",
-    "",
-    "### ORIGINAL CODE (context):",
-    "<<codigo_original>>",
-    "",
-    "### MIGRATED CODE (to confirm context):",
-    "<<codigo_migrado>>"
+    "<<diff_str>>"
   ]
 }

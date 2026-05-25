@@ -1,13 +1,11 @@
 {
-  "pipeline_start": "2026-05-25T08:08:34.343737",
-  "total_elapsed_s": 88.2,
+  "pipeline_start": "2026-05-25T15:36:09.211106",
+  "total_elapsed_s": 508.1,
   "input_file": "C:\\Users\\joiso\\Desktop\\agente-migracao-TALP\\url.py",
   "backend": {
-    "ollama_disponivel": false,
-    "ollama_model": null,
+    "ollama_disponivel": true,
+    "ollama_model": "llama3.1:8b",
     "groq_usado_em": [
-      "migration",
-      "test",
       "review-leves"
     ],
     "gemini_usado_em": [
@@ -17,23 +15,21 @@
   "stages": {
     "migration": {
       "status": "validado",
-      "elapsed_s": 25.961430549621582,
-      "migrated_lines": 222,
-      "backend": "Groq (llama-3.1-8b-instant)"
+      "elapsed_s": 104.66056799888611,
+      "migrated_lines": 126,
+      "backend": "Ollama (llama3.1:8b)"
     },
     "test": {
-      "decision": "error",
+      "decision": "skipped",
       "iteration": null,
       "elapsed_s": null,
-      "error": "Missing credentials. Please pass an `api_key`, `workload_identity`, `admin_api_key`, or set the `OPENAI_API_KEY` or `OPENAI_ADMIN_KEY` environment variable.",
+      "error": null,
       "backend": null
     },
     "review": {
-      "agentes_acionados": [],
-      "iteracoes": 1,
       "deve_reprocessar": false,
-      "achados_total": 0,
-      "elapsed_s": 24.023437023162842,
+      "achados_total": 3,
+      "elapsed_s": 398.32259035110474,
       "error": null,
       "backend": "Gemini 2.5 Flash (pesados) + Groq 8B (leves)"
     }
