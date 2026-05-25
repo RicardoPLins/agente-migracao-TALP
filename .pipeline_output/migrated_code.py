@@ -8,11 +8,8 @@ import io
 import argparse
 import configparser
 import logging
-import urlparse
 
 class ConversationScraper:
-    """Scraper that retrieves, manipulates and stores all messages belonging to a specific Faceboo conversation"""
-
     REQUEST_WAIT = 10
     ERROR_WAIT = 30
     CONVERSATION_ENDMARK = "end_of_history"
@@ -27,27 +24,7 @@ class ConversationScraper:
         self._fb_dtsg = fb_dtsg
         self._userID = userID
 
-
-    """
-    POST Request full form data:
-
-    "messages[user_ids][][offset]": "",
-    "messages[user_ids][][timestamp]": "",
-    "messages[user_ids][][]": "",
-    "client": "",
-    "__user": "",
-    "__a": "",
-    "__dyn": "",
-    "__req": "",
-    "fb_dtsg": "",
-    "ttstamp": "",
-    "__rev": ""
-
-    """
     def generateRequestData(self):
-        """Generate the data for the POST request.
-         :return: the generated data
-        """
         dataForm = {"messages[user_ids][" + str(self._convID) + "][offset]": str(self._offset),
                      "messages[user_ids][" + str(self._convID) + "][timestamp]": self._timestamp,
                      "messages[user_ids][" + str(self._convID) + "][limit]": str(self._chunkSize),
@@ -56,30 +33,9 @@ class ConversationScraper:
                      "__dyn": "",
                      "__req": "",
                      "fb_dtsg": self._fb_dtsg}
-        data = requests.utils.urlencode(dataForm)
-        return data
+        return dataForm
 
-    """
-    POST Request all header:
-
-    "Host": "www.facebook.com",
-    "Origin": "http://www.facebook.com",
-    "Referer": "https://www.facebook.com",
-    "accept-encoding": "gzip,deflate",
-    "accept-language": "en-US,en;q=0.8",
-    "cookie": "",
-    "pragma": "no-cache",
-    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/37.0.2062.122 Safari/537.36",
-    "content-type": "application/x-www-form-urlencoded",
-    "accept": "*/*",
-    "cache-control": "no-cache"
-
-    """
     def executeRequest(self, requestData):
-        """Executes the POST request and retrieves the correspondent response content.
-        The request headers are generate here
-        :return: the response content
-        """
         headers = {"Host": "www.facebook.com",
                    "Origin":"http://www.facebook.com",
                    "Referer":"https://www.facebook.com",
@@ -96,18 +52,12 @@ class ConversationScraper:
 
         start = time.time()
         response = requests.post(url, data=requestData, headers=headers)
-        response.raise_for_status()
-        with gzip.GzipFile(fileobj=response.content) as uncompressed:
-            decompressedFile = uncompressed.read()
+        decompressedFile = gzip.decompress(response.content)
         end = time.time()
         logging.info("Retrieved in {}s".format(end-start))
         return  decompressedFile.decode("utf-8")
 
     def scrapeConversation(self, merge):
-        """Retrieves all conversation messages and stores them in a JSON file
-        If merge is specified, then new messages are merged the the previously already scraped conversation
-        """
-
         if not os.path.exists(self._directory):
             if merge:
                 logging.error("Conversation not present. Merge operation not possible")
@@ -123,40 +73,43 @@ class ConversationScraper:
         msgsData = ""
         while self.CONVERSATION_ENDMARK not in msgsData:
             reqData = self.generateRequestData()
-            #TODO remove timestamp info
             print("Retrieving messages " + str(self._offset) + "-" + str(self._chunkSize+self._offset) + ", timestamp " + self._timestamp)
-            responseData = self.executeRequest(reqData)
-            #Remove additional leading characters
+            try:
+                responseData = self.executeRequest(reqData)
+            except requests.exceptions.RequestException as e:
+                logging.error("Request error: {}".format(e))
+                logging.info("Retrying in {} seconds".format(self.ERROR_WAIT))
+                time.sleep(self.ERROR_WAIT)
+                continue
             msgsData = responseData[9:]
-            jsonData = json.loads(msgsData)
+            try:
+                jsonData = json.loads(msgsData)
+            except json.JSONDecodeError as e:
+                logging.error("JSON decode error: {}".format(e))
+                logging.info("Retrying in {} seconds".format(self.ERROR_WAIT))
+                time.sleep(self.ERROR_WAIT)
+                continue
 
             numMsgs = 0
-            if jsonData and jsonData['payload']:
+            if jsonData and 'payload' in jsonData:
                 try:
                     actions = jsonData['payload']['actions']
                     numMsgs += len(actions)
 
-                    #case when the last message already present in the conversation
-                    #is older newer than the first one of the current retrieved chunk
-                    #print(str(convMessages[-1]["timestamp"]) + " > " + str(actions[0]["timestamp"]))
                     if merge and convMessages[-1]["timestamp"] > actions[0]["timestamp"]:
                         print(str(convMessages[-1]["timestamp"]) + " > " + str(actions[0]["timestamp"]))
                         for i, action in enumerate(actions):
                             if convMessages[-1]["timestamp"] == actions[i]["timestamp"]:
                                 print("Found same message: " + actions[i]["timestamp"])
-                                messages = convMessages + actions[i+1:-1] + messages
+                                messages = convMessages + actions[i+1:] + messages
                                 break
                         break
 
-                    #We retrieve one message two times, as the first one of the previous chunk
-                    #and as the last one of the new one. So we here remove the duplicate,
-                    #but only once we already retrieved at least one chunk
                     if len(messages) == 0:
                         messages = actions
                     else:
                         messages = actions[:-1] + messages
 
-                    #update timestamp
                     try:
                         self._timestamp = str(actions[0]["timestamp"])
                     except KeyError:
@@ -166,15 +119,9 @@ class ConversationScraper:
                     pass
             else:
                 logging.error("Response error. Empty data or payload")
-                logging.info("Retrying in " + str(self.ERROR_WAIT) + " seconds")
+                logging.info("Retrying in {} seconds".format(self.ERROR_WAIT))
                 time.sleep(self.ERROR_WAIT)
                 continue
-
-            # outPath = directory + str(self._offset) + "-" + str(self._chunkSize+self._offset) + ".json"
-            # with open(outPath, 'w') as out:
-            #     out.write(msgsData)
-            # command = "python -mjson.tool " + outPath + " > " + pretty_directory + str(self._offset) + "-" + str(self._chunkSize+self._offset) + ".pretty.json"
-            # os.system(command)
 
             self._offset += self._chunkSize
             logging.info("Waiting {}s for the next request".format(self.REQUEST_WAIT))
@@ -192,8 +139,6 @@ def main(_):
     parser.add_argument('-id', metavar='conversationID', dest='convID', required=True)
     parser.add_argument('-sz', metavar='chunkSize', type=int, dest='chunkSize', default=2000)
     parser.add_argument('-off', metavar='offset', type=int, dest='offset', default=0)
-    #Tells the program to try to merge the new messages of a previously already scraped conversation
-    #avoid the need to scrape it all from the beginning
     parser.add_argument('-m', dest='merge', action='store_true')
     parser.set_defaults(merge=False)
     parser.add_argument('-out', metavar='outputDir', dest='outDir', default='..\\..\\Messages')

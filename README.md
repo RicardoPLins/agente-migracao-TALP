@@ -44,6 +44,15 @@ python scripts/run_pipeline_real.py --examples 3 --timeout 300
 
 This runs migration → review → test and saves outputs to `.run_output/`.
 
+**Open the web interface**
+
+```bash
+source .venv/bin/activate
+uvicorn api.app:app --reload
+```
+
+Then open `http://127.0.0.1:8000/` and paste the code you want to migrate.
+
 **Run only the test agent**
 
 ```bash

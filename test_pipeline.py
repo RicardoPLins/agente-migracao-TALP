@@ -506,6 +506,8 @@ def main():
             encoding="utf-8",
         )
 
+        break
+
     (out_dir / "migrated_code.py").write_text(migrated_code, encoding="utf-8")
     (out_dir / "migration_result.json").write_text(
         json.dumps(
@@ -546,7 +548,7 @@ def main():
 
         if revision_loop > MAX_REVISION_LOOPS:
             print(f"\n  ⚠️  Limite de {MAX_REVISION_LOOPS} revisões atingido — prosseguindo para review")
-            break
+            
 
         print(f"\n  🔄 Router: NEEDS_REVISION — iniciando iteração {revision_loop}/{MAX_REVISION_LOOPS}")
         print(f"  Aguardando 15s para respeitar rate limit do Groq...")
