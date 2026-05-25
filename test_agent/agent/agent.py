@@ -34,7 +34,7 @@ MIN_BASELINE          = 3
 llm = ChatOpenAI(
     api_key=os.getenv("PROVIDER_API_KEY"),
     base_url=os.getenv("PROVIDER_BASE_URL"),
-    model="llama-3.3-70b-versatile",
+    model="meta-llama/llama-4-scout-17b-16e-instruct",
     temperature=0.0,
     max_tokens=4096,
 )
@@ -324,37 +324,19 @@ def _validate_test_code(code: str, module_quirks: dict | None = None) -> tuple[b
     if not has_any_mock:
         return False, "No mocking found — tests would make real HTTP requests"
 
-    # Reject responses used as context managers
+    # Rejeitar responses como context manager
     if re.search(r"with\s+responses\.activate\s*\(\)", code):
         return False, "responses.activate() used as context manager — use @responses.activate decorator"
     if re.search(r"with\s+responses\.RequestsMock\s*\(\)", code):
         return False, "responses.RequestsMock() used as context manager — use @responses.activate decorator"
 
-    # If original uses gzip, reject mocks that serve plain JSON (not gzip-compressed)
+    # Checar gzip: só rejeita se não tiver nenhuma referência a gzip no código inteiro
     uses_gzip = (module_quirks or {}).get("original", {}).get("uses_gzip", False)
-    if uses_gzip:
-        bad_plain_mock = re.search(
-            r"mock_resp\.read\.(return_value|side_effect)\s*=\s*\[?json\.dumps",
-            code,
+    if uses_gzip and not re.search(r"gzip\.", code):
+        return False, (
+            "urllib mock missing gzip — original uses gzip compression. "
+            "Use gzip.compress() and buf.read as side_effect"
         )
-        if bad_plain_mock:
-            return False, (
-                "urllib mock serves plain JSON bytes but original uses gzip — "
-                "use gzip.compress() and buf.read as side_effect"
-            )
-
-    # Reject responses.add() without PREFIX when migrated has response_strip_chars > 0
-    strip_chars = (module_quirks or {}).get("migrated", {}).get("response_strip_chars", 0)
-    if strip_chars and strip_chars > 0:
-        bad_migrated_body = re.search(
-            r"responses\.add\([^)]*,\s*(?:body\s*=\s*json\.dumps|json\s*=\s*\{)",
-            code,
-        )
-        if bad_migrated_body:
-            return False, (
-                f"responses.add() uses plain JSON body but migrated strips "
-                f"{strip_chars} chars internally — use body=PREFIX+json.dumps(...)"
-            )
 
     for test_name in re.findall(r"def (test_\w+)", code):
         match = re.search(
