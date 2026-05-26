@@ -269,7 +269,7 @@ def _import_review_agent():
 
 # ── Funções de execução de cada etapa ─────────────────────────────────────────
 
-def run_migration(codigo_original: str, num_examples: int = 10) -> dict:
+def run_migration(codigo_original: str, num_examples: int = 30) -> dict:
     """Executa o migration_agent. Retorna: migrated_code, status, messages."""
     print(f"\n{'='*60}")
     print("  ETAPA 1 — MIGRATION AGENT")
@@ -458,8 +458,8 @@ def main():
         help="Diretorio para salvar os artefatos de saida",
     )
     parser.add_argument(
-        "--examples", type=int, default=10,
-        help="Exemplos few-shot para o migration_agent (padrao: 10)",
+        "--examples", type=int, default=30,
+        help="Exemplos few-shot para o migration_agent (padrao: 30)",
     )
     parser.add_argument(
         "--skip-test", action="store_true",
