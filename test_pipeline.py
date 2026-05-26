@@ -17,10 +17,10 @@ Variáveis de ambiente necessárias para o review_agent:
 
 Uso:
     python test_pipeline.py [--input url.py] [--output-dir .pipeline_output]
+    python test_pipeline.py --skip-migration --skip-test   # só review_agent
 
 Variáveis de ambiente:
-    GROQ_API_KEY   — obrigatória se Ollama não estiver disponível,
-                     ou se review não for pulado (--skip-review)
+    GROQ_API_KEY   — obrigatória para review_agent em cloud (sem Ollama)
     OLLAMA_MODEL   — modelo Ollama a usar (padrão: detectado automaticamente)
     OLLAMA_HOST    — host do Ollama (padrão: http://localhost:11434)
 """
@@ -367,12 +367,7 @@ def run_test(original_code: str, migrated_code: str) -> dict:
 def run_review(original_code: str, migrated_code: str, max_retries: int = 3) -> dict:
     """
     Executa o review_agent diretamente (sem FastAPI).
-    Estratégia multi-LLM definida internamente pelo review-agent.py:
-      · Raciocínio (semântico, crítico) → Gemini 2.5 Pro
-      · Análise (parser, segurança)     → Gemini 2.5 Flash
-      · Lint                            → Groq llama-3.3-70b
-      · Mecânico (classificador, report) → Groq llama-3.1-8b
-    Retry externo com backoff para erros que escapem dos retries internos.
+    Cloud: Groq 70b (semantico/seguranca/lint) + Groq 8b (relatorio).
     """
     print(f"\n{'='*60}")
     print("  ETAPA 3 — REVIEW AGENT")
@@ -382,23 +377,16 @@ def run_review(original_code: str, migrated_code: str, max_retries: int = 3) -> 
         f"Ollama (heavy={os.environ['REVIEW_OLLAMA_MODEL_HEAVY']}, "
         f"light={os.environ['REVIEW_OLLAMA_MODEL_LIGHT']})"
         if OLLAMA_DISPONIVEL
-        else "Gemini Pro/Flash + Groq 70b/8b (tiers por nó)"
+        else "Groq 70b + Groq 8b (cloud)"
     )
     print(f"  Backend : {backend_rev}")
     print(f"{'='*60}")
     t0 = time.time()
 
-    google_key = os.getenv("GOOGLE_API_KEY")
-    if not GROQ_API_KEY or not google_key:
-        faltando = []
-        if not GROQ_API_KEY:
-            faltando.append("GROQ_API_KEY (nós leves: classificador, lint, relatório)")
-        if not google_key:
-            faltando.append("GOOGLE_API_KEY (nós pesados: parser, semântico, segurança, crítico)")
+    if not OLLAMA_DISPONIVEL and not GROQ_API_KEY:
         raise RuntimeError(
-            "Chaves de API ausentes para o review_agent:\n" +
-            "\n".join(f"  · {k}" for k in faltando) +
-            "\nDefina as chaves no .env ou use --skip-review para pular esta etapa."
+            "GROQ_API_KEY ausente para o review_agent. "
+            "Defina no .env ou use --skip-review."
         )
 
     ra = _import_review_agent()
@@ -428,8 +416,10 @@ def run_review(original_code: str, migrated_code: str, max_retries: int = 3) -> 
     elapsed = time.time() - t0
 
     print(f"  Agentes acionados : {result.get('agentes_acionados', [])}")
-    print(f"  Iteracoes critico : {result.get('iteracoes', 0)}")
     print(f"  Deve reprocessar  : {result.get('deve_reprocessar', False)}")
+    if result.get("feedback_migracao"):
+        preview = result["feedback_migracao"][:200].replace("\n", " ")
+        print(f"  Feedback migracao : {preview}...")
     print(f"  Achados semantica : {len(result.get('achados_semantica', []))}")
     print(f"  Achados seguranca : {len(result.get('achados_seguranca', []))}")
     print(f"  Achados lint      : {len(result.get('achados_lint', []))}")
@@ -441,7 +431,34 @@ def run_review(original_code: str, migrated_code: str, max_retries: int = 3) -> 
 
 # ── Pipeline principal ─────────────────────────────────────────────────────────
 
-MAX_REVISION_LOOPS = 3   # evita loop infinito
+MAX_PIPELINE_LOOPS = 3   # migration → test → review (repete se review achar P0/P1)
+
+
+def _contexto_review_para_migration(review_result: dict) -> str:
+    """Bloco injetado no migration_agent na remigração."""
+    fb = (review_result.get("feedback_migracao") or "").strip()
+    if fb:
+        return f"\n\n{fb}"
+    if not review_result.get("deve_reprocessar"):
+        return ""
+    linhas: list[str] = []
+    for chave, titulo in (
+        ("achados_semantica", "Semântica"),
+        ("achados_seguranca", "Segurança"),
+        ("achados_lint", "Lint"),
+    ):
+        for achado in review_result.get(chave) or []:
+            if any(tag in achado for tag in ("[P0]", "[P1]", "[P2]", "[P3]")):
+                if "[INFO]" in achado or "No relevant" in achado:
+                    continue
+                linhas.append(f"- [{titulo}] {achado.lstrip('- ').strip()}")
+    if not linhas:
+        return ""
+    return (
+        "\n\nCORREÇÕES DO REVIEW (P0/P1 bloqueiam — refaça a migração, "
+        "incluindo P2/P3 se listados):\n"
+        + "\n".join(linhas)
+    )
 
 def main():
     import argparse
@@ -466,6 +483,14 @@ def main():
         help="Pular etapa test_agent",
     )
     parser.add_argument(
+        "--skip-migration", action="store_true",
+        help="Pular migration — usa migrated_code.py existente em --output-dir (ou --migrated)",
+    )
+    parser.add_argument(
+        "--migrated", default="",
+        help="Caminho do codigo migrado (default: --output-dir/migrated_code.py)",
+    )
+    parser.add_argument(
         "--skip-review", action="store_true",
         help="Pular etapa review_agent (util quando cota diaria Groq esta esgotada)",
     )
@@ -474,6 +499,10 @@ def main():
         help="Forcar um modelo Ollama especifico (ex: llama3.1, codellama)",
     )
     args = parser.parse_args()
+
+    if args.skip_migration and args.skip_review:
+        print("ERRO: --skip-migration e --skip-review juntos nao executam nenhuma etapa.")
+        sys.exit(1)
 
     # Sobrescreve modelo se passado via flag
     global OLLAMA_MODEL
@@ -496,118 +525,182 @@ def main():
     print(f"  Input  : {input_path}")
     print(f"  Output : {out_dir.resolve()}")
     print(f"  Ollama : {'SIM — ' + OLLAMA_MODEL if OLLAMA_DISPONIVEL else 'NAO (usando Groq)'}")
+    if args.skip_migration:
+        mig_path = Path(args.migrated) if args.migrated else out_dir / "migrated_code.py"
+        print(f"  Modo   : REVIEW ONLY (--skip-migration) — {mig_path}")
     print(f"{'#'*60}")
 
-    pipeline_start  = time.time()
-    migration_result = None
+    pipeline_start   = time.time()
+    migration_result: dict | None = None
     test_result      = {"decision": "skipped"}
-    review_result    = {}
-
-    # ── Loop migration → test (com revisão se necessário) ─────────────────────
+    review_result: dict = {}
     current_original = original_code
     current_migrated = ""
-    revision_loop    = 0
+    pipeline_ciclo   = 0
+    review_feedback  = ""
 
-    while revision_loop <= MAX_REVISION_LOOPS:
+    if args.skip_migration:
+        migrated_path = Path(args.migrated) if args.migrated else out_dir / "migrated_code.py"
+        if not migrated_path.is_file():
+            print(f"ERRO: --skip-migration exige arquivo migrado: {migrated_path}")
+            sys.exit(1)
 
-        # ── ETAPA 1: Migration ────────────────────────────────────────────────
-        # Iteration 0: migrates from the original code.
-        # Subsequent iterations: migrator receives original + router suggestions.
-        if revision_loop == 0:
-            migration_result = run_migration(current_original, num_examples=args.examples)
-        else:
-            suggestions = test_result.get("router_decision", {}).get("suggestions", [])
-            context = (
-                "\n\nCONTEXTO DE REVISÃO (iteração {}):\n".format(revision_loop)
-                + "\n".join(f"- {s}" for s in suggestions)
-            ) if suggestions else ""
-            migration_result = run_migration(current_original + context, num_examples=args.examples)
+        current_migrated = migrated_path.read_text(encoding="utf-8")
+        migration_result = {
+            "status": "skipped",
+            "messages": [],
+            "inferencia_semantica": "",
+            "elapsed_s": 0,
+            "backend": "skipped (--skip-migration)",
+        }
+        print("\n  ETAPA 1 — MIGRATION AGENT: pulada (--skip-migration)")
 
+        if not args.skip_test:
+            print("  AVISO: --skip-migration nao remigra; test_agent ignorado (use --skip-test).")
+            args.skip_test = True
+
+        if not args.skip_review:
+            wait_review = 10 if not OLLAMA_DISPONIVEL else 5
+            print(f"\n  Aguardando {wait_review}s antes do review...")
+            time.sleep(wait_review)
+            try:
+                review_result = run_review(current_original, current_migrated)
+            except Exception as exc:
+                print(f"\n  AVISO: review_agent falhou: {exc}")
+                review_result = {"error": str(exc)}
+
+    elif args.skip_review:
+        migration_result = run_migration(current_original, num_examples=args.examples)
         current_migrated = migration_result["migrated_code"]
-
-        # Save per-iteration artifact
-        suffix = f"_iter{revision_loop}" if revision_loop > 0 else ""
-        (out_dir / f"migrated_code{suffix}.py").write_text(current_migrated, encoding="utf-8")
-        (out_dir / f"migration_result{suffix}.json").write_text(
-            json.dumps({k: v for k, v in migration_result.items() if k != "migrated_code"},
-                       ensure_ascii=False, indent=2),
+        (out_dir / "migrated_code.py").write_text(current_migrated, encoding="utf-8")
+        (out_dir / "migration_result.json").write_text(
+            json.dumps(
+                {k: v for k, v in migration_result.items() if k != "migrated_code"},
+                ensure_ascii=False, indent=2,
+            ),
             encoding="utf-8",
         )
+        if not args.skip_test:
+            if not OLLAMA_DISPONIVEL:
+                time.sleep(10)
+            try:
+                test_result = run_test(original_code, current_migrated)
+            except Exception as exc:
+                print(f"\n  AVISO: test_agent falhou: {exc}")
+                test_result = {"error": str(exc), "decision": "error"}
+        print("\n  ETAPA 3 — REVIEW AGENT: pulada (--skip-review)")
 
-        # ── ETAPA 2: Test ─────────────────────────────────────────────────────
-        if args.skip_test:
-            test_result = {"decision": "skipped"}
-            break  # skip test → go straight to review
+    else:
+        while pipeline_ciclo < MAX_PIPELINE_LOOPS:
+            ciclo_label = f"ciclo {pipeline_ciclo + 1}/{MAX_PIPELINE_LOOPS}"
+            print(f"\n{'='*60}")
+            print(f"  PIPELINE {ciclo_label.upper()}")
+            print(f"{'='*60}")
 
-        if not OLLAMA_DISPONIVEL:
-            print("\n  Aguardando 10s (rate limit Groq entre etapas)...")
-            time.sleep(10)
-        try:
-            test_result = run_test(original_code, current_migrated)
-            if test_result.get("report"):
-                (out_dir / "test_report.md").write_text(
-                    test_result["report"], encoding="utf-8"
-                )
-            (out_dir / "test_result.json").write_text(
+            codigo_migracao = current_original
+            if pipeline_ciclo > 0 and review_feedback:
+                codigo_migracao = current_original + review_feedback
+                print("  Remigrando com feedback do review (P0/P1 + P2/P3)...")
+
+            migration_result = run_migration(codigo_migracao, num_examples=args.examples)
+            current_migrated = migration_result["migrated_code"]
+
+            suffix = f"_ciclo{pipeline_ciclo}" if pipeline_ciclo > 0 else ""
+            (out_dir / f"migrated_code{suffix}.py").write_text(current_migrated, encoding="utf-8")
+            (out_dir / f"migration_result{suffix}.json").write_text(
                 json.dumps(
-                    {k: v for k, v in test_result.items() if k != "report"},
+                    {k: v for k, v in migration_result.items() if k != "migrated_code"},
                     ensure_ascii=False, indent=2,
                 ),
                 encoding="utf-8",
             )
-        except Exception as exc:
-            print(f"\n  AVISO: test_agent falhou: {exc}")
-            print("  Continuando para o review_agent...")
-            test_result = {"error": str(exc), "decision": "error"}
-            break
 
-        # ── Router decision ───────────────────────────────────────────────────
-        needs_revision = test_result.get("router_decision", {}).get("needs_revision", False)
-        if not needs_revision:
-            break  # test approved → exit loop
+            if args.skip_test:
+                test_result = {"decision": "skipped"}
+            else:
+                if not OLLAMA_DISPONIVEL:
+                    print("\n  Aguardando 10s (rate limit Groq entre etapas)...")
+                    time.sleep(10)
+                try:
+                    test_result = run_test(original_code, current_migrated)
+                    if test_result.get("report"):
+                        (out_dir / f"test_report{suffix}.md").write_text(
+                            test_result["report"], encoding="utf-8"
+                        )
+                    (out_dir / f"test_result{suffix}.json").write_text(
+                        json.dumps(
+                            {k: v for k, v in test_result.items() if k != "report"},
+                            ensure_ascii=False, indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
+                except Exception as exc:
+                    print(f"\n  AVISO: test_agent falhou: {exc}")
+                    print("  Continuando para o review_agent...")
+                    test_result = {"error": str(exc), "decision": "error"}
 
-        if revision_loop >= MAX_REVISION_LOOPS:
-            print(f"\n  ⚠️  Limite de {MAX_REVISION_LOOPS} revisões atingido — prosseguindo para review")
-            break
+            wait_review = 10 if not OLLAMA_DISPONIVEL else 5
+            print(f"\n  Aguardando {wait_review}s antes do review...")
+            time.sleep(wait_review)
+            try:
+                review_result = run_review(current_original, current_migrated)
+            except Exception as exc:
+                print(f"\n  AVISO: review_agent falhou: {exc}")
+                review_result = {"error": str(exc)}
+                break
 
-        revision_loop += 1
-        print(f"\n  🔄 Router: NEEDS_REVISION — iniciando iteração {revision_loop}/{MAX_REVISION_LOOPS}")
-        if not OLLAMA_DISPONIVEL:
-            print("  Aguardando 15s para respeitar rate limit do Groq...")
-            time.sleep(15)
+            if review_result.get("relatorio_final"):
+                (out_dir / f"review_report{suffix}.md").write_text(
+                    review_result["relatorio_final"], encoding="utf-8",
+                )
+            (out_dir / f"review_result{suffix}.json").write_text(
+                json.dumps(
+                    {k: v for k, v in review_result.items() if k != "relatorio_final"},
+                    ensure_ascii=False, indent=2,
+                ),
+                encoding="utf-8",
+            )
 
-    # Save final migrated artifact (outside loop — reflects last iteration)
-    (out_dir / "migrated_code.py").write_text(current_migrated, encoding="utf-8")
-    (out_dir / "migration_result.json").write_text(
-        json.dumps(
-            {k: v for k, v in migration_result.items() if k != "migrated_code"},
-            ensure_ascii=False, indent=2,
-        ),
-        encoding="utf-8",
-    )
+            if not review_result.get("deve_reprocessar"):
+                print(f"\n  Review aprovado (sem P0/P1 bloqueantes) — fim do pipeline.")
+                break
 
-    # ── ETAPA: Review ─────────────────────────────────────────────────────────
-    if not args.skip_review:
-        # Review usa Gemini (pesados) + Groq 8B (leves) — pausa para Groq nos leves
-        wait_review = 10 if not OLLAMA_DISPONIVEL else 5
-        print(f"\n  Aguardando {wait_review}s antes do review (Groq rate limit)...")
-        time.sleep(wait_review)
-        try:
-            review_result = run_review(current_original, current_migrated)
-        except Exception as exc:
-            print(f"\n  AVISO: review_agent falhou: {exc}")
-            review_result = {"error": str(exc)}
-    else:
-        print("\n  ETAPA 3 — REVIEW AGENT: pulada (--skip-review)")
+            if pipeline_ciclo >= MAX_PIPELINE_LOOPS - 1:
+                print(
+                    f"\n  Limite de {MAX_PIPELINE_LOOPS} ciclos atingido — "
+                    "P0/P1 ainda presentes; ver review_report.md"
+                )
+                break
 
-    if review_result.get("relatorio_final"):
-        (out_dir / "review_report.md").write_text(
-            review_result["relatorio_final"], encoding="utf-8"
+            review_feedback = _contexto_review_para_migration(review_result)
+            pipeline_ciclo += 1
+            print(
+                f"\n  Review sinalizou P0/P1 — reiniciando migration → test → review "
+                f"({pipeline_ciclo + 1}/{MAX_PIPELINE_LOOPS})..."
+            )
+            if not OLLAMA_DISPONIVEL:
+                time.sleep(15)
+
+    if current_migrated and migration_result and not args.skip_migration:
+        (out_dir / "migrated_code.py").write_text(current_migrated, encoding="utf-8")
+    if migration_result and not args.skip_migration:
+        (out_dir / "migration_result.json").write_text(
+            json.dumps(
+                {k: v for k, v in migration_result.items() if k != "migrated_code"},
+                ensure_ascii=False, indent=2,
+            ),
+            encoding="utf-8",
         )
-    if review_result:
+    if review_result.get("relatorio_final") and not args.skip_review:
+        (out_dir / "review_report.md").write_text(
+            review_result["relatorio_final"], encoding="utf-8",
+        )
+    if review_result and not args.skip_review:
         (out_dir / "review_result.json").write_text(
-            json.dumps({k: v for k, v in review_result.items() if k != "relatorio_final"},
-                       ensure_ascii=False, indent=2),
+            json.dumps(
+                {k: v for k, v in review_result.items() if k != "relatorio_final"},
+                ensure_ascii=False, indent=2,
+            ),
             encoding="utf-8",
         )
 
@@ -622,19 +715,16 @@ def main():
             "ollama_disponivel": OLLAMA_DISPONIVEL,
             "ollama_model": OLLAMA_MODEL if OLLAMA_DISPONIVEL else None,
             "groq_usado_em": (
-                ["migration", "test", "review-leves"] if not OLLAMA_DISPONIVEL
-                else (["review-leves"] if not args.skip_review else [])
-            ),
-            "gemini_usado_em": (
-                ["review-pesados"] if not args.skip_review else []
+                ["migration", "test", "review"] if not OLLAMA_DISPONIVEL
+                else (["review"] if not args.skip_review else [])
             ),
         },
         "stages": {
             "migration": {
-                "status": migration_result.get("status"),
-                "elapsed_s": migration_result.get("elapsed_s"),
-                "migrated_lines": len(current_migrated.splitlines()),
-                "backend": migration_result.get("backend"),
+                "status": (migration_result or {}).get("status"),
+                "elapsed_s": (migration_result or {}).get("elapsed_s"),
+                "migrated_lines": len(current_migrated.splitlines()) if current_migrated else 0,
+                "backend": (migration_result or {}).get("backend"),
             },
             "test": {
                 "decision": test_result.get("decision"),
@@ -665,7 +755,7 @@ def main():
     print(f"\n{'#'*60}")
     print("  PIPELINE CONCLUIDO")
     print(f"  Tempo total : {total_elapsed:.1f}s")
-    print(f"  Migration   : {migration_result.get('status')}")
+    print(f"  Migration   : {(migration_result or {}).get('status', 'n/a')}")
     print(f"  Test        : {test_result.get('decision', 'skipped')}")
     if review_result.get("error"):
         print(f"  Review          : erro — {review_result['error'][:80]}")
