@@ -1,126 +1,237 @@
-import requests
+"""
+Legacy requests-based HTTP client module.
+This file intentionally contains multiple requests usages
+for migration and refactoring practice.
+"""
+
 import json
-from io import BytesIO
-import gzip
-import logging
+import ssl
 import time
-import os
+import requests
+from requests.adapters import HTTPAdapter
+from requests.exceptions import HTTPError, ConnectionError, Timeout, RequestException
 
-class ConversationScraper:
-    REQUEST_WAIT = 10
-    ERROR_WAIT = 30
-    CONVERSATION_ENDMARK = "end_of_history"
 
-    def __init__(self, convID, offset, chunkSize, cookie, fb_dtsg, userID, outDir):
-        self._directory = outDir + "/" + str(convID) + "/"
-        self._convID = convID
-        self._timestamp = ""
-        self._offset = offset
-        self._chunkSize = chunkSize
-        self._cookie = cookie
-        self._fb_dtsg = fb_dtsg
-        self._userID = userID
+BASE_URL = "https://api.example.com"
+DEFAULT_TIMEOUT = 10
 
-    def generateRequestData(self):
-        dataForm = {"messages[user_ids][" + str(self._convID) + "][offset]": str(self._offset),
-                     "messages[user_ids][" + str(self._convID) + "][timestamp]": self._timestamp,
-                     "messages[user_ids][" + str(self._convID) + "][limit]": str(self._chunkSize),
-                     "client": "web_messenger",
-                     "__a": "",
-                     "__dyn": "",
-                     "__req": "",
-                     "fb_dtsg": self._fb_dtsg}
-        data = requests.utils.urlencode(dataForm)
-        return data.encode('utf-8')
 
-    def executeRequest(self, requestData):
-        headers = {"Host": "www.facebook.com",
-                   "Origin":"http://www.facebook.com",
-                   "Referer":"https://www.facebook.com",
-                   "accept-encoding": "gzip,deflate",
-                   "accept-language": "en-US,en;q=0.8",
-                   "cookie": self._cookie,
-                   "pragma": "no-cache",
-                   "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/37.0.2062.122 Safari/537.36",
-                   "content-type": "application/x-www-form-urlencoded",
-                   "accept": "*/*",
-                   "cache-control": "no-cache"}
+def create_ssl_context():
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context
 
-        url = "https://www.facebook.com/ajax/mercury/thread_info.php"
 
-        start = time.time()
-        response = requests.post(url, data=requestData, headers=headers)
-        decompressedFile = gzip.GzipFile(fileobj=BytesIO(response.content)).read().decode('utf-8')
-        end = time.time()
-        logging.info("Retrieved in {}s".format(end-start))
-        return  decompressedFile
+def build_headers(token=None):
+    headers = {
+        "User-Agent": "LegacyClient/1.0",
+        "Accept": "application/json",
+    }
 
-    def scrapeConversation(self, merge):
-        if not os.path.exists(self._directory):
-            if merge:
-                logging.error("Conversation not present. Merge operation not possible")
-                return
-            os.makedirs(self._directory)
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
 
-        logging.info("Starting scraping of conversation {}".format(self._convID))
+    return headers
 
-        messages = []
-        if merge:
-            with open(self._directory + "conversation.json") as conv:
-                convMessages = json.load(conv)
-        msgsData = ""
-        while self.CONVERSATION_ENDMARK not in msgsData:
-            reqData = self.generateRequestData()
-            print("Retrieving messages " + str(self._offset) + "-" + str(self._chunkSize+self._offset) + ", timestamp " + self._timestamp)
-            responseData = self.executeRequest(reqData)
-            #Remove additional leading characters
-            msgsData = responseData[9:]
-            jsonData = json.loads(msgsData)
 
-            numMsgs = 0
-            if jsonData and jsonData['payload']:
-                try:
-                    actions = jsonData['payload']['actions']
-                    numMsgs += len(actions)
+def encode_query(params):
+    return requests.compat.urlencode(params)
 
-                    #case when the last message already present in the conversation
-                    #is older newer than the first one of the current retrieved chunk
-                    #print(str(convMessages[-1]["timestamp"]) + " > " + str(actions[0]["timestamp"]))
-                    if merge and convMessages[-1]["timestamp"] > actions[0]["timestamp"]:
-                        print(str(convMessages[-1]["timestamp"]) + " > " + str(actions[0]["timestamp"]))
-                        for i, action in enumerate(actions):
-                            if convMessages[-1]["timestamp"] == actions[i]["timestamp"]:
-                                print("Found same message: " + actions[i]["timestamp"])
-                                messages = convMessages + actions[i+1:-1] + messages
-                                break
 
-                    #We retrieve one message two times, as the first one of the previous chunk
-                    #and as the last one of the new one. So we here remove the duplicate,
-                    #but only once we already retrieved at least one chunk
-                    if len(messages) == 0:
-                        messages = actions
-                    else:
-                        messages = actions[:-1] + messages
+def build_url(path, params=None):
+    url = f"{BASE_URL}/{path}"
 
-                    #update timestamp
-                    try:
-                        self._timestamp = str(actions[0]["timestamp"])
-                    except KeyError:
-                        print(actions[0])
-                except KeyError:
-                    logging.warning("No payload or actions in response")
-                    pass
-            else:
-                logging.error("Response error. Empty data or payload")
-                logging.info("Retrying in " + str(self.ERROR_WAIT) + " seconds")
-                time.sleep(self.ERROR_WAIT)
-                continue
+    if params:
+        query = encode_query(params)
+        url = f"{url}?{query}"
 
-            self._offset += self._chunkSize
-            logging.info("Waiting {}s for the next request".format(self.REQUEST_WAIT))
-            time.sleep(self.REQUEST_WAIT)
+    return url
 
-        logging.info("Conversation scraped successfully. {} messages retrieved".format(numMsgs))
 
-        with open(self._directory + "conversation.json", 'w') as conv:
-            conv.write(json.dumps(messages))
+def fetch_users():
+    url = build_url("users")
+
+    response = requests.get(url, timeout=DEFAULT_TIMEOUT)
+
+    return response.json()
+
+
+def fetch_user_by_id(user_id):
+    url = build_url(f"users/{user_id}")
+
+    response = requests.get(url, headers=build_headers())
+
+    return response.json()
+
+
+def create_user(payload, token):
+    url = build_url("users")
+
+    data = json.dumps(payload)
+
+    response = requests.post(url, data=data, headers=build_headers(token))
+
+    return response.json()
+
+
+def update_user(user_id, payload, token):
+    url = build_url(f"users/{user_id}")
+
+    data = json.dumps(payload)
+
+    response = requests.put(url, data=data, headers=build_headers(token))
+
+    return response.text
+
+
+def delete_user(user_id, token):
+    url = build_url(f"users/{user_id}")
+
+    response = requests.delete(url, headers=build_headers(token))
+
+    return response.status_code
+
+
+def download_report(report_id, output_file):
+    url = build_url(f"reports/{report_id}/download")
+
+    response = requests.get(url)
+
+    with open(output_file, "wb") as file:
+        file.write(response.content)
+
+
+def send_form_data(form):
+    url = build_url("forms/submit")
+
+    response = requests.post(url, data=form)
+
+    return response.text
+
+
+def upload_metrics(metrics):
+    url = build_url("metrics")
+
+    data = json.dumps(metrics)
+
+    response = requests.post(url, data=data, headers={"Content-Type": "application/json"})
+
+    return response.json()
+
+
+def fetch_with_retry(path, retries=3):
+    url = build_url(path)
+
+    for attempt in range(retries):
+        try:
+            response = requests.get(url)
+
+            return response.text
+
+        except ConnectionError:
+            print(f"Retry {attempt + 1}")
+            time.sleep(1)
+
+    return None
+
+
+def configure_proxy():
+    proxies = {
+        "http": "http://proxy.local:8080",
+        "https": "http://proxy.local:8080",
+    }
+
+    adapter = HTTPAdapter()
+    session = requests.Session()
+    session.proxies = proxies
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+
+
+def ping_service():
+    url = build_url("health")
+
+    response = requests.get(url)
+
+    return response.status_code == 200
+
+
+def fetch_binary_asset(asset_id):
+    url = build_url(f"assets/{asset_id}")
+
+    response = requests.get(url)
+
+    return response.content
+
+
+def fetch_headers():
+    url = build_url("headers")
+
+    response = requests.get(url)
+
+    return dict(response.headers)
+
+
+def submit_feedback(message, email):
+    url = build_url("feedback")
+
+    payload = {
+        "message": message,
+        "email": email,
+    }
+
+    data = json.dumps(payload)
+
+    response = requests.post(url, data=data, headers={"Content-Type": "application/json"})
+
+    return response.text
+
+
+def fetch_secure_data():
+    url = build_url("secure")
+
+    response = requests.get(url, verify=False)
+
+    return response.text
+
+
+def execute_batch_requests(ids):
+    results = []
+
+    for item_id in ids:
+        url = build_url(f"items/{item_id}")
+
+        response = requests.get(url)
+
+        results.append(response.json())
+
+    return results
+
+
+def main():
+    configure_proxy()
+
+    users = fetch_users()
+
+    print("Users:", users)
+
+    health = ping_service()
+
+    print("Service healthy:", health)
+
+    metrics = {
+        "cpu": 45,
+        "memory": 70,
+    }
+
+    upload_metrics(metrics)
+
+    submit_feedback(
+        message="System running correctly",
+        email="admin@example.com"
+    )
+
+
+if __name__ == "__main__":
+    main()
