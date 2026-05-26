@@ -14,10 +14,12 @@ sinaliza `deve_reprocessar = True` para que o migration_agent refaça a migraç�
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.request as _urllib_request
@@ -82,15 +84,19 @@ def _strip_md_fences(text: str) -> str:
 # Priority 1 — Ollama (local):   zero cost, zero rate limits, zero API keys.
 #   All nodes use the same local model configured via REVIEW_OLLAMA_MODEL.
 #
-# Priority 2 — Cloud fallback (when Ollama is not running):
-#   Light nodes  → Groq llama-3.1-8b-instant  (fast, low token consumption)
-#   Heavy nodes  → Google Gemini 2.5 Flash     (deep reasoning, generous quota)
+# Priority 2 — Cloud fallback (when Ollama is not running), four tiers:
+#   Tier 1 — Gemini 2.5 Pro    → no_semantico, no_critico (deep reasoning)
+#   Tier 2 — Gemini 2.5 Flash  → no_parser, no_seguranca (structured analysis)
+#   Tier 3 — Groq llama-3.3-70b → no_lint (technical interpretation of tool output)
+#   Tier 4 — Groq llama-3.1-8b  → no_classificador, relatorio_final (mechanical tasks)
 #
 # Detection runs once at startup; no overhead per node call.
 
-_MODEL_GROQ_LIGHT   = "llama-3.1-8b-instant"
-_MODEL_GEMINI_HEAVY = "gemini-2.5-flash"
-_OLLAMA_HOST        = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+_MODEL_GROQ_LIGHT   = os.getenv("REVIEW_GROQ_MODEL_LIGHT", "llama-3.1-8b-instant")
+_MODEL_GROQ_LINT     = os.getenv("REVIEW_GROQ_MODEL_LINT", "llama-3.3-70b-versatile")
+_MODEL_GEMINI_FLASH = os.getenv("REVIEW_GEMINI_MODEL_HEAVY", "gemini-2.5-flash")
+_MODEL_GEMINI_PRO    = os.getenv("REVIEW_GEMINI_MODEL_REASONING", "gemini-2.5-pro")
+_OLLAMA_HOST         = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
 # Two-tier Ollama strategy: heavy nodes get a larger/code-specific model,
 # light nodes get a smaller/faster model.
@@ -100,27 +106,39 @@ _OLLAMA_HOST        = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 # Single-model fallback: REVIEW_OLLAMA_MODEL applies to all nodes.
 _MODEL_OLLAMA_HEAVY = os.getenv(
     "REVIEW_OLLAMA_MODEL_HEAVY",
-    os.getenv("REVIEW_OLLAMA_MODEL", "llama3.1:8b"),
+    os.getenv("REVIEW_OLLAMA_MODEL", "qwen2.5-coder:14b"),
 )
 _MODEL_OLLAMA_LIGHT = os.getenv(
     "REVIEW_OLLAMA_MODEL_LIGHT",
-    os.getenv("REVIEW_OLLAMA_MODEL", "llama3.1:8b"),
+    os.getenv("REVIEW_OLLAMA_MODEL", "qwen2.5-coder:3b"),
 )
 # Legacy alias — still used by _detectar_ollama_local to verify availability
 _MODEL_OLLAMA = _MODEL_OLLAMA_HEAVY
 
-_LIGHT_NODES: frozenset[str] = frozenset({
-    "no_classificador",  # diff pattern matching → agent list
-    "no_lint",           # interprets deterministic Ruff output
-    "relatorio_final",   # consolidates already-structured findings into Markdown
+# Ollama routing — all analysis nodes use the heavy model.
+_OLLAMA_HEAVY_NODES: frozenset[str] = frozenset({
+    "no_parser",
+    "no_semantico",
+    "no_seguranca",
+    "no_critico",
 })
 
-_HEAVY_NODES: frozenset[str] = frozenset({
-    "no_parser",     # receives the full diff (can have thousands of tokens)
-    "no_semantico",  # multi-step reasoning about functional equivalence
-    "no_seguranca",  # security domain analysis
+# Cloud routing — tiered by task profile.
+_REASONING_NODES: frozenset[str] = frozenset({
+    "no_semantico",  # multi-step functional equivalence reasoning
     "no_critico",    # meta-evaluation of finding quality (reflection)
 })
+
+_FLASH_NODES: frozenset[str] = frozenset({
+    "no_parser",     # structured JSON extraction from long diffs
+    "no_seguranca",  # security domain analysis
+})
+
+_LIGHT_NODES: frozenset[str] = frozenset({
+    "no_classificador",  # diff pattern matching → agent list
+    "relatorio_final",   # consolidates already-structured findings into Markdown
+})
+# no_lint → handled separately (Groq 70b for technical tool-output interpretation)
 
 # Substitution of full code files in iterations 2+.
 # The raw_diff with unified=5 already contains the (-/+) lines and sufficient context;
@@ -136,17 +154,41 @@ _REFINAMENTO_NOTA = (
 _PADRAO_ACHADO = re.compile(r"^-\s*\[")
 
 
-def _resolver_modelo_ollama(desejado: str, disponiveis: list[str]) -> str:
+def _resolver_modelo_ollama(
+    desejado: str,
+    disponiveis: list[str],
+    *,
+    papel: str = "heavy",
+) -> str:
     """
     Resolves the best available Ollama model for a requested model name.
-    Priority: exact match → prefix match → first available.
+    Priority: exact match → prefix match → coder model (heavy) → warn + fallback.
     """
     if desejado in disponiveis:
         return desejado
-    match = next((m for m in disponiveis if m.startswith(desejado.split(":")[0])), None)
+    base = desejado.split(":")[0]
+    match = next((m for m in disponiveis if m.startswith(base)), None)
     if match:
+        if match != desejado:
+            print(
+                f"  [review_agent] AVISO: modelo '{desejado}' não instalado; "
+                f"usando '{match}' ({papel})"
+            )
         return match
-    return disponiveis[0]
+    if papel == "heavy":
+        coder = next((m for m in disponiveis if "coder" in m.lower()), None)
+        if coder:
+            print(
+                f"  [review_agent] AVISO: '{desejado}' não encontrado; "
+                f"usando modelo coder '{coder}' ({papel})"
+            )
+            return coder
+    fallback = disponiveis[0]
+    print(
+        f"  [review_agent] AVISO: '{desejado}' não encontrado; "
+        f"fallback '{fallback}' ({papel})"
+    )
+    return fallback
 
 
 def _detectar_ollama_local() -> tuple[bool, str, str]:
@@ -164,8 +206,8 @@ def _detectar_ollama_local() -> tuple[bool, str, str]:
         if not modelos:
             return False, "", ""
 
-        heavy = _resolver_modelo_ollama(_MODEL_OLLAMA_HEAVY, modelos)
-        light = _resolver_modelo_ollama(_MODEL_OLLAMA_LIGHT, modelos)
+        heavy = _resolver_modelo_ollama(_MODEL_OLLAMA_HEAVY, modelos, papel="heavy")
+        light = _resolver_modelo_ollama(_MODEL_OLLAMA_LIGHT, modelos, papel="light")
         return True, heavy, light
     except Exception:
         return False, "", ""
@@ -180,7 +222,11 @@ if _OLLAMA_DISPONIVEL:
     else:
         print(f"  [review_agent] Ollama detected — heavy: {_OLLAMA_HEAVY_ATIVO} / light: {_OLLAMA_LIGHT_ATIVO}")
 else:
-    print("  [review_agent] Ollama not detected — using Gemini (heavy) + Groq (light)")
+    print(
+        "  [review_agent] Ollama not detected — cloud tiers: "
+        "Gemini Pro (semantico/critico) + Gemini Flash (parser/seguranca) + "
+        "Groq 70b (lint) + Groq 8b (classificador/relatorio)"
+    )
 
 
 def _get_llm(node: str = "default") -> ChatOllama | ChatGroq | ChatGoogleGenerativeAI:
@@ -188,20 +234,20 @@ def _get_llm(node: str = "default") -> ChatOllama | ChatGroq | ChatGoogleGenerat
     Returns the appropriate LLM for the given node.
 
     When Ollama is running locally — two-tier strategy:
-      Heavy nodes → REVIEW_OLLAMA_MODEL_HEAVY (default: llama3.1:8b)
+      Heavy nodes → REVIEW_OLLAMA_MODEL_HEAVY (default: qwen2.5-coder:14b)
         • no_parser, no_semantico, no_seguranca, no_critico
-        Recommended: qwen2.5-coder:14b or qwen2.5-coder:32b
-      Light nodes → REVIEW_OLLAMA_MODEL_LIGHT (default: same as heavy)
+      Light nodes → REVIEW_OLLAMA_MODEL_LIGHT (default: qwen2.5-coder:3b)
         • no_classificador, no_lint, relatorio_final
-        Recommended: qwen2.5-coder:3b or llama3.2:3b
 
-    When Ollama is unavailable (cloud fallback):
-      Heavy nodes  → Gemini 2.5 Flash   (deep reasoning, generous quota)
-      Light nodes  → Groq llama-3.1-8b  (fast, low token consumption)
+    When Ollama is unavailable (cloud fallback), four tiers:
+      Tier 1 — Gemini 2.5 Pro    → no_semantico, no_critico
+      Tier 2 — Gemini 2.5 Flash  → no_parser, no_seguranca
+      Tier 3 — Groq 70b          → no_lint
+      Tier 4 — Groq 8b           → no_classificador, relatorio_final
     """
     if _OLLAMA_DISPONIVEL:
         ollama_model = (
-            _OLLAMA_HEAVY_ATIVO if node in _HEAVY_NODES else _OLLAMA_LIGHT_ATIVO
+            _OLLAMA_HEAVY_ATIVO if node in _OLLAMA_HEAVY_NODES else _OLLAMA_LIGHT_ATIVO
         )
         return ChatOllama(
             model=ollama_model,
@@ -209,24 +255,56 @@ def _get_llm(node: str = "default") -> ChatOllama | ChatGroq | ChatGoogleGenerat
             temperature=0.0,
         )
 
-    if node in _HEAVY_NODES:
-        if not os.getenv("GOOGLE_API_KEY"):
+    google_key = os.getenv("GOOGLE_API_KEY")
+    groq_key   = os.getenv("GROQ_API_KEY")
+
+    if node in _REASONING_NODES:
+        if not google_key:
             raise ValueError(
                 "GOOGLE_API_KEY not found. Either start Ollama or set this env var."
             )
         return ChatGoogleGenerativeAI(
-            model=_MODEL_GEMINI_HEAVY,
+            model=_MODEL_GEMINI_PRO,
             temperature=0.0,
         )
 
-    if not os.getenv("GROQ_API_KEY"):
+    if node in _FLASH_NODES:
+        if not google_key:
+            raise ValueError(
+                "GOOGLE_API_KEY not found. Either start Ollama or set this env var."
+            )
+        return ChatGoogleGenerativeAI(
+            model=_MODEL_GEMINI_FLASH,
+            temperature=0.0,
+        )
+
+    if not groq_key:
         raise ValueError(
             "GROQ_API_KEY not found. Either start Ollama or set this env var."
         )
+
+    if node == "no_lint":
+        return ChatGroq(
+            model=_MODEL_GROQ_LINT,
+            temperature=0.0,
+        )
+
     return ChatGroq(
         model=_MODEL_GROQ_LIGHT,
         temperature=0.0,
     )
+
+
+def _get_backend_label() -> str:
+    """Descreve o backend LLM efetivamente em uso (para logs e JSON de saída)."""
+    if _OLLAMA_DISPONIVEL:
+        if _OLLAMA_HEAVY_ATIVO == _OLLAMA_LIGHT_ATIVO:
+            return f"Ollama ({_OLLAMA_HEAVY_ATIVO})"
+        return (
+            f"Ollama (heavy={_OLLAMA_HEAVY_ATIVO}, light={_OLLAMA_LIGHT_ATIVO}; "
+            f"semantico→{_OLLAMA_HEAVY_ATIVO})"
+        )
+    return "Gemini Pro/Flash + Groq 70b/8b (cloud tiers)"
 
 
 def _invoke_com_retry(llm: Any, prompt: str, max_tentativas: int = 3) -> Any:
@@ -234,7 +312,7 @@ def _invoke_com_retry(llm: Any, prompt: str, max_tentativas: int = 3) -> Any:
     Invoca o LLM com retry exponencial em caso de rate limit (429/413).
 
     Este wrapper é a rede de segurança para erros de cota que escapam das
-    estratégias primárias (Gemini para nós pesados, Groq 8B para nós leves).
+    estratégias primárias (Gemini Pro/Flash + Groq 70b/8b por tier de nó).
     Não adiciona latência quando não há rate limit — o sleep só ocorre após erro.
 
     Backoff: 30s → 60s → 120s (dobrando a cada tentativa).
@@ -296,6 +374,8 @@ class CodeReviewState(TypedDict):
     # Inicializados como None em _executar_grafo; preenchidos pelo no_lint na iter 1.
     ruff_config:       dict | None   # Config Ruff inferida na iter 1
     ruff_novos_issues: list | None   # Issues novos do Ruff na iter 1
+    mypy_findings:     list | None   # Erros mypy do código migrado (iter 1)
+    lint_achados_pinados: list | None  # Achados confirmados iter 1 — propagados sem re-LLM
 
     # Histórico de achados por iteração (preenchido pelo no_roteador antes de limpar)
     # Lista de dicts: [{"iteracao": N, "semantica": [...], "seguranca": [...], "lint": [...]}]
@@ -359,6 +439,39 @@ def _run_git_diff(codigo_original: str, codigo_migrado: str) -> str | None:
                 os.unlink(path)
 
 
+def _extrair_imports_top_level(code_str: str) -> set[str]:
+    """Extrai nomes de módulo de nível superior via AST (determinístico)."""
+    try:
+        tree = ast.parse(code_str)
+    except SyntaxError:
+        return set()
+    mods: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                mods.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            mods.add(node.module.split(".")[0])
+    return mods
+
+
+def _normalizar_deps_diff(
+    codigo_original: str,
+    codigo_migrado: str,
+    diff: dict,
+) -> dict:
+    """
+    Recalcula added/removed_dependencies a partir dos imports reais nos arquivos.
+    Corrige alucinações do LLM (ex.: listar gzip/os como removidos quando ainda importados).
+    """
+    orig = _extrair_imports_top_level(codigo_original)
+    mig = _extrair_imports_top_level(codigo_migrado)
+    diff = dict(diff)
+    diff["added_dependencies"] = sorted(mig - orig)
+    diff["removed_dependencies"] = sorted(orig - mig)
+    return diff
+
+
 def no_parser(state: CodeReviewState) -> dict:
     """
     Compara código original e migrado, extrai o diff estruturado e mapeia
@@ -376,8 +489,6 @@ def no_parser(state: CodeReviewState) -> dict:
     if raw_diff:
         raw_diff_para_prompt = raw_diff
     else:
-        # Git unavailable: embed full code in diff context so the LLM can still
-        # compare the files. The prompt variable name stays the same.
         raw_diff_para_prompt = (
             "(git not available — compare the two code listings below directly)\n\n"
             "### ORIGINAL CODE:\n```python\n"
@@ -394,6 +505,13 @@ def no_parser(state: CodeReviewState) -> dict:
         diff = json.loads(_strip_md_fences(response.content))
     except json.JSONDecodeError:
         diff = {"raw": response.content, "parse_error": True}
+
+    if isinstance(diff, dict) and not diff.get("parse_error"):
+        diff = _normalizar_deps_diff(
+            state["codigo_original"],
+            state["codigo_migrado"],
+            diff,
+        )
 
     return {
         "raw_diff":         raw_diff or "",
@@ -545,7 +663,10 @@ def no_semantico(state: CodeReviewState) -> dict:
     O raw_diff fornece números de linha exatos por achado (técnica PR-Agent).
     Em iterações de refinamento, inclui `motivo_rejeicao` para refinar o foco.
 
-    Usa Gemini 2.5 Flash: raciocínio multi-step sobre equivalência funcional.
+    Padrões de regressão comuns estão no prompt (exemplos generalizados) — o LLM
+    infere a migração a partir do diff estruturado e do raw_diff.
+
+    Usa Gemini 2.5 Pro (cloud) / Ollama heavy: raciocínio multi-step sobre equivalência funcional.
     """
     llm = _get_llm("no_semantico")
     critica = (
@@ -562,11 +683,11 @@ def no_semantico(state: CodeReviewState) -> dict:
         raw_diff=state.get("raw_diff") or "(git diff not available)",
     )
     response = _invoke_com_retry(llm, prompt)
-    achados = [
+    achados = list(dict.fromkeys(
         linha.strip()
         for linha in response.content.split("\n")
         if _PADRAO_ACHADO.match(linha.strip())
-    ]
+    ))
     return {"achados_semantica": achados or ["- [INFO][P3] No relevant semantic findings."]}
 
 
@@ -583,7 +704,7 @@ def no_seguranca(state: CodeReviewState) -> dict:
     O raw_diff fornece números de linha exatos por achado (técnica PR-Agent).
     Em iterações de refinamento, inclui `motivo_rejeicao` para refinar o foco.
 
-    Usa Gemini 2.5 Flash: análise de domínio em segurança de software.
+    Usa Gemini 2.5 Flash (cloud) / Ollama heavy: análise de domínio em segurança de software.
     """
     llm = _get_llm("no_seguranca")
     critica = (
@@ -600,11 +721,11 @@ def no_seguranca(state: CodeReviewState) -> dict:
         raw_diff=state.get("raw_diff") or "(git diff not available)",
     )
     response = _invoke_com_retry(llm, prompt)
-    achados = [
+    achados = list(dict.fromkeys(
         linha.strip()
         for linha in response.content.split("\n")
         if _PADRAO_ACHADO.match(linha.strip())
-    ]
+    ))
     return {"achados_seguranca": achados or ["- [INFO][P3] No relevant security findings."]}
 
 
@@ -630,7 +751,7 @@ def _inferir_config_ruff(codigo_original: str, llm: ChatOllama | ChatGroq | Chat
     """
     prompt = _render("agente_lint_config", codigo_original=codigo_original)
     response = _invoke_com_retry(llm, prompt)
-    defaults = {"line_length": 88, "select": ["E", "W", "F", "I"], "ignore": [], "indent_width": 4}
+    defaults: dict[str, Any] = {"line_length": 88, "select": ["E", "W", "F", "I"], "ignore": [], "indent_width": 4}
     try:
         config = json.loads(_strip_md_fences(response.content))
         llm_select = config.get("select", defaults["select"])
@@ -718,74 +839,168 @@ def _filtrar_novos_issues(
     return novos
 
 
+def _run_mypy(code_str: str) -> list[dict]:
+    """
+    Executa mypy sobre o código migrado e retorna achados do tipo error/warning.
+    Detecta chamadas de atributos inexistentes (attr-defined), erros de tipo, etc.
+    Usa sys.executable para garantir o mypy correto do ambiente virtual ativo.
+    Retorna [] em caso de falha (mypy não instalado, erro de sintaxe, etc.).
+    """
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".py", encoding="utf-8", delete=False
+        ) as tmp:
+            tmp.write(code_str)
+            tmp_path = tmp.name
+
+        result = subprocess.run(
+            [
+                sys.executable, "-m", "mypy", tmp_path,
+                "--ignore-missing-imports",
+                "--no-error-summary",
+                "--no-color-output",
+                "--show-error-codes",
+                "--check-untyped-defs",   # analyse bodies of unannotated functions
+                                          # (required to catch attr-defined inside methods)
+            ],
+            capture_output=True, text=True, timeout=60,
+        )
+        findings: list[dict] = []
+        # mypy output: path:line: severity: message  [error-code]
+        # Use greedy path match so Windows drive letters (C:\...) parse correctly.
+        pattern = re.compile(
+            r"^(.+):(\d+): (error|warning|note): (.+?)(?:\s+\[([^\]]+)\])?$"
+        )
+        for line in result.stdout.splitlines():
+            m = pattern.match(line)
+            if m and m.group(3) in ("error", "warning"):
+                findings.append({
+                    "line":     int(m.group(2)),
+                    "severity": m.group(3),
+                    "message":  m.group(4).strip(),
+                    "code":     m.group(5) or "",
+                })
+        return findings
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return []
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+def _mypy_para_achados(mypy_findings: list[dict]) -> list[str]:
+    """
+    Converte saída mypy em achados formatados — determinístico, sem LLM.
+    Regras fixas alinhadas ao error-code do mypy (única fonte determinística aqui).
+    """
+    achados: list[str] = []
+    for f in mypy_findings:
+        line = f.get("line", "?")
+        msg = f.get("message", "")
+        code = f.get("code", "")
+        sev = f.get("severity", "error")
+        if sev == "error" and code == "attr-defined":
+            achados.append(
+                f"- [BLOCKER][P0] line {line} — {msg} "
+                f"Trigger: AttributeError at runtime when this line executes."
+            )
+        elif sev == "error" and code == "var-annotated":
+            achados.append(
+                f"- [TYPING-DRY][P2] line {line} — {msg} "
+                f"Trigger: static type checker warning only; no runtime crash."
+            )
+        elif sev == "error":
+            achados.append(
+                f"- [WARNING][P1] line {line} — {msg} "
+                f"Trigger: type error may cause runtime failure."
+            )
+        elif sev == "warning":
+            achados.append(
+                f"- [WARNING][P2] line {line} — {msg} "
+                f"Trigger: type annotation regression."
+            )
+    return achados
+
+
+_LINHA_ACHADO = re.compile(r"\bline\s+(\d+)\b", re.IGNORECASE)
+
+
+def _filtrar_achados_linha_invalida(codigo: str, achados: list[str]) -> list[str]:
+    """
+    Descarta achados LLM cujo número de linha não existe no código migrado.
+    Achados mypy já vêm com linhas validadas pelo compilador.
+    """
+    total = len(codigo.splitlines())
+    validos: list[str] = []
+    for achado in achados:
+        m = _LINHA_ACHADO.search(achado)
+        if not m:
+            continue  # exige linha explícita
+        linha = int(m.group(1))
+        if 1 <= linha <= total:
+            validos.append(achado)
+    return validos
+
+
 def no_lint(state: CodeReviewState) -> dict:
     """
-    Valida lint e estilo do código migrado usando Ruff como tool use determinístico.
+    Valida lint e estilo do código migrado: Ruff + mypy (determinísticos) + LLM.
 
-    Pipeline interno:
+    Pipeline interno (iteração 1):
     1. LLM infere o estilo implícito do código original → config Ruff dinâmica.
-    2. Ruff é executado em ambos os códigos (original e migrado) via subprocess.
-    3. Filtro de regressão: isola apenas os *novos* issues introduzidos.
-    4. LLM interpreta os novos issues avaliando severidade e contexto.
+    2. Ruff  — detecta issues de estilo/importação novos vs. original.
+    3. mypy  — detecta atributos inexistentes, erros de tipo (convertidos sem LLM).
+    4. LLM interpreta achados Ruff e verifica padrões de migração generalizados
+       no código migrado (exemplos no prompt — não hardcoded no nó).
+    5. Achados finais = mypy (determinístico) + LLM; salvos em `lint_achados_pinados`.
 
-    Achados são validados com _PADRAO_ACHADO para garantir o formato padronizado:
-      - [BLOCKER][P0] / [WARNING][P2] / [COSMETIC][P3] `symbol` (line N) — desc.
-
-    Usa modelo 8B: o Ruff já fez a detecção determinística; o LLM só interpreta.
+    Iterações 2+: `lint_achados_pinados` é retornado diretamente, sem re-invocar o LLM.
     """
     llm = _get_llm("no_lint")
-
     iteracao = state.get("iteracao", 1)
 
-    if iteracao > 1 and state.get("ruff_config") is not None:
-        # Iteração 2+: o código não mudou, então o Ruff produziria exatamente
-        # os mesmos resultados. Reutiliza config e issues cacheados da iter 1,
-        # poupando 2 chamadas ao Ruff + 1 chamada LLM (_inferir_config_ruff).
-        ruff_config  = state["ruff_config"]
-        novos_issues = state.get("ruff_novos_issues", [])
-    else:
-        # Iteração 1: infere estilo, roda Ruff em ambos os arquivos e filtra.
-        ruff_config     = _inferir_config_ruff(state["codigo_original"], llm)
-        issues_original = _run_ruff(state["codigo_original"], ruff_config)
-        issues_migrado  = _run_ruff(state["codigo_migrado"],  ruff_config)
-        novos_issues    = _filtrar_novos_issues(issues_original, issues_migrado)
-
-    if not novos_issues:
+    if iteracao > 1 and state.get("lint_achados_pinados") is not None:
         return {
-            "achados_lint":      ["- No new lint/style issues introduced by the migration."],
-            "ruff_config":       ruff_config,
-            "ruff_novos_issues": novos_issues,
+            "achados_lint":         state["lint_achados_pinados"],
+            "ruff_config":          state.get("ruff_config"),
+            "ruff_novos_issues":    state.get("ruff_novos_issues", []),
+            "mypy_findings":        state.get("mypy_findings", []),
+            "lint_achados_pinados": state["lint_achados_pinados"],
         }
 
-    # LLM interprets new issues (severity + context).
-    # In iterations 2+, codigo_migrado is not resent — the LLM focuses on the critique.
-    critica = (
-        f"\n⚠️  FEEDBACK FROM PREVIOUS ITERATION — address the points below:\n{state['motivo_rejeicao']}"
-        if state.get("motivo_rejeicao")
-        else ""
-    )
-    codigo_migrado_ctx = (
-        "[REFINEMENT — same code as iteration 1. Focus on the issues and the feedback below.]"
-        if iteracao > 1
-        else state["codigo_migrado"]
-    )
+    ruff_config     = _inferir_config_ruff(state["codigo_original"], llm)
+    issues_original = _run_ruff(state["codigo_original"], ruff_config)
+    issues_migrado  = _run_ruff(state["codigo_migrado"],  ruff_config)
+    novos_issues    = _filtrar_novos_issues(issues_original, issues_migrado)
+    mypy_findings   = _run_mypy(state["codigo_migrado"])
+    mypy_achados    = _mypy_para_achados(mypy_findings)
+
     prompt = _render(
         "agente_lint_interpretacao",
-        critica=critica,
+        critica="",
         novos_issues=json.dumps(novos_issues, ensure_ascii=False, indent=2),
         estilo_inferido=json.dumps(ruff_config, ensure_ascii=False, indent=2),
-        codigo_migrado=codigo_migrado_ctx,
+        codigo_migrado=state["codigo_migrado"],
     )
     response = _invoke_com_retry(llm, prompt)
-    achados = [
+    llm_achados = list(dict.fromkeys(
         linha.strip()
         for linha in response.content.split("\n")
         if _PADRAO_ACHADO.match(linha.strip())
-    ]
+    ))
+    llm_achados = _filtrar_achados_linha_invalida(state["codigo_migrado"], llm_achados)
+
+    achados_finais = list(dict.fromkeys(mypy_achados + llm_achados))
+    if not achados_finais:
+        achados_finais = ["- [INFO][P3] No relevant new lint/style issues identified."]
+
     return {
-        "achados_lint":      achados or ["- [INFO][P3] No relevant new lint/style issues identified."],
-        "ruff_config":       ruff_config,
-        "ruff_novos_issues": novos_issues,
+        "achados_lint":         achados_finais,
+        "ruff_config":          ruff_config,
+        "ruff_novos_issues":    novos_issues,
+        "mypy_findings":        mypy_findings,
+        "lint_achados_pinados": achados_finais,
     }
 
 
@@ -825,7 +1040,7 @@ def no_critico(state: CodeReviewState) -> dict:
       sinaliza `deve_reprocessar = True` para que o migration_agent refaça a
       migração — ao invés de forçar uma aprovação sem embasamento.
 
-    Usa modelo Gemini: meta-avaliação da qualidade dos achados (raciocínio sobre raciocínio).
+    Usa Gemini 2.5 Pro (cloud) / Ollama heavy: meta-avaliação da qualidade dos achados.
     """
     todos_achados = (
         state.get("achados_semantica", [])
@@ -909,55 +1124,168 @@ def _rota_pos_critico(
 # Nó 6 – Relatório Final
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _achados_relevantes(achados: list[str]) -> list[str]:
+    """Remove linhas 'no findings' dos achados finais."""
+    return [
+        a for a in achados
+        if "[INFO]" not in a and "No relevant" not in a and "(not triggered)" not in a
+    ]
+
+
+def _agrupar_por_severidade(achados: list[str]) -> dict[str, list[str]]:
+    buckets: dict[str, list[str]] = {px: [] for px in ("P0", "P1", "P2", "P3")}
+    for achado in achados:
+        for px in buckets:
+            if f"[{px}]" in achado:
+                buckets[px].append(achado)
+                break
+    return buckets
+
+
+def _formatar_lista_achados(items: list[str]) -> str:
+    return "\n".join(items) if items else "_(none)_"
+
+
+def _montar_recomendacoes(buckets: dict[str, list[str]]) -> str:
+    linhas: list[str] = []
+    if buckets["P0"]:
+        linhas.append(
+            "1. Fix all P0 blockers first — these cause guaranteed runtime failures."
+        )
+    if buckets["P1"]:
+        linhas.append(
+            "2. Address P1 high-severity regressions before merging."
+        )
+    if buckets["P2"]:
+        linhas.append(
+            "3. Resolve P2 typing/style issues to keep maintainability."
+        )
+    if buckets["P3"]:
+        linhas.append(
+            "4. P3 cosmetic items are optional but improve code quality."
+        )
+    if not linhas:
+        linhas.append("No actionable items — migration review passed.")
+    return "\n".join(linhas)
+
+
+def _montar_relatorio_markdown(state: CodeReviewState, exec_summary: str) -> str:
+    """
+    Monta seções 2–6 deterministicamente a partir do estado FINAL do grafo.
+    O LLM só preenche o Executive Summary (2–3 frases).
+    """
+    sem = _achados_relevantes(state.get("achados_semantica", []))
+    seg = _achados_relevantes(state.get("achados_seguranca", []))
+    lint = _achados_relevantes(state.get("achados_lint", []))
+    todos = sem + seg + lint
+    buckets = _agrupar_por_severidade(todos)
+
+    historico = state.get("historico_achados", [])
+    hist_str = json.dumps(historico, ensure_ascii=False, indent=2) if historico else "[]"
+    total_iters = state.get("iteracao", 1)
+    deve_reprocess = state.get("deve_reprocessar", False)
+
+    if deve_reprocess:
+        verdict = (
+            "❌ REQUIRES CORRECTIONS — the reflection loop exhausted 3 iterations "
+            "and still found unresolved issues. The migration_agent must redo the migration."
+        )
+    elif buckets["P0"] or buckets["P1"]:
+        verdict = "❌ REQUIRES CORRECTIONS — unresolved P0/P1 findings remain."
+    else:
+        verdict = "✅ APPROVED — no P0/P1 findings in the final iteration."
+
+    return f"""# Code Migration Review Report
+
+## 1. Executive Summary
+{exec_summary}
+
+---
+
+## 2. Findings by Severity
+
+### 🔴 Critical (P0)
+{_formatar_lista_achados(buckets["P0"])}
+
+### 🟠 High (P1)
+{_formatar_lista_achados(buckets["P1"])}
+
+### 🟡 Medium (P2)
+{_formatar_lista_achados(buckets["P2"])}
+
+### 🟢 Low / Cosmetic (P3)
+{_formatar_lista_achados(buckets["P3"])}
+
+---
+
+## 3. Detailed Findings
+
+### Semantic Findings
+{_formatar_lista_achados(sem)}
+
+### Security Findings
+{_formatar_lista_achados(seg)}
+
+### Lint / Style Findings
+{_formatar_lista_achados(lint)}
+
+---
+
+## 4. Reflection Loop History
+Total iterations: {total_iters}
+
+{hist_str}
+
+---
+
+## 5. Priority Recommendations
+{_montar_recomendacoes(buckets)}
+
+---
+
+## 6. Final Verdict
+{verdict}
+"""
+
+
 def no_relatorio_final(state: CodeReviewState) -> dict:
     """
-    Consolida todos os achados validados em um relatório Markdown estruturado.
-    A IA NÃO corrige o código — apenas reporta e orienta.
+    Consolida achados validados em relatório Markdown.
 
-    O relatório segue um template rígido definido em relatorio_final.json com
-    seções obrigatórias: Summary, Findings by Severity, Details, Verdict.
-    Achados do histórico de iterações são incluídos quando há mais de 1 rodada.
+    Seções 2–6 são montadas deterministicamente a partir do estado FINAL
+    (achados_semantica/seguranca/lint da última iteração) — o histórico
+    aparece apenas na seção 4 e não contamina findings descartados.
 
-    Quando `deve_reprocessar = True`, antecipa um cabeçalho de alerta indicando
-    que o migration_agent deve ser acionado novamente.
-
-    Usa modelo 8B: consolida achados já estruturados em Markdown.
+    O LLM gera apenas o Executive Summary (2–3 frases).
     """
     llm = _get_llm("relatorio_final")
 
-    achados_str = "\n".join([
+    sem = _achados_relevantes(state.get("achados_semantica", []))
+    seg = _achados_relevantes(state.get("achados_seguranca", []))
+    lint = _achados_relevantes(state.get("achados_lint", []))
+    achados_resumo = "\n".join([
         "### Semantics:",
-        *state.get("achados_semantica", ["(not triggered)"]),
+        *(sem if sem else ["_(none)_"]),
         "",
         "### Security:",
-        *state.get("achados_seguranca", ["(not triggered)"]),
+        *(seg if seg else ["_(none)_"]),
         "",
         "### Lint/Style:",
-        *state.get("achados_lint", ["(not triggered)"]),
+        *(lint if lint else ["_(none)_"]),
     ])
-    diff_str      = json.dumps(state.get("diff_estruturado", {}), ensure_ascii=False, indent=2)
-    historico     = state.get("historico_achados", [])
-    hist_str      = json.dumps(historico, ensure_ascii=False, indent=2) if historico else "[]"
-    total_iters   = str(state.get("iteracao", 1))
-    deve_reprocess = state.get("deve_reprocessar", False)
-    verdict_hint  = (
-        "FORCED VERDICT: ❌ REQUIRES CORRECTIONS — the reflection loop exhausted 3 iterations "
-        "and still found unresolved issues. The migration_agent must redo the migration."
-        if deve_reprocess
-        else "Determine the verdict based on the findings above."
-    )
 
     prompt = _render(
         "relatorio_final",
-        achados_str=achados_str,
-        diff_str=diff_str,
-        historico_str=hist_str,
-        total_iteracoes=total_iters,
-        verdict_hint=verdict_hint,
+        achados_resumo=achados_resumo,
+        deve_reprocessar=str(state.get("deve_reprocessar", False)),
     )
     response = _invoke_com_retry(llm, prompt)
+    exec_summary = response.content.strip() or (
+        "Migration review completed. See findings by severity below."
+    )
 
-    conteudo = response.content
+    conteudo = _montar_relatorio_markdown(state, exec_summary)
+
     if state.get("deve_reprocessar"):
         aviso = (
             "# ⚠️ ACTION REQUIRED: Reprocessing by Migration Agent\n\n"
@@ -1052,9 +1380,11 @@ def _executar_grafo(codigo_original: str, codigo_migrado: str) -> dict:
         "iteracao":          0,
         "deve_reprocessar":  False,
         "relatorio_final":   "",
-        "ruff_config":       None,
-        "ruff_novos_issues": None,
-        "historico_achados": [],
+        "ruff_config":          None,
+        "ruff_novos_issues":    None,
+        "mypy_findings":        None,
+        "lint_achados_pinados": None,
+        "historico_achados":    [],
     }
     result = graph.invoke(initial_state)
     return {
@@ -1068,6 +1398,7 @@ def _executar_grafo(codigo_original: str, codigo_migrado: str) -> dict:
         "historico_achados":  result.get("historico_achados", []),
         "deve_reprocessar":   result.get("deve_reprocessar", False),
         "relatorio_final":    result.get("relatorio_final", ""),
+        "backend":            _get_backend_label(),
     }
 
 

@@ -1,6 +1,6 @@
 {
-  "pipeline_start": "2026-05-25T15:36:09.211106",
-  "total_elapsed_s": 508.1,
+  "pipeline_start": "2026-05-26T10:14:05.704068",
+  "total_elapsed_s": 4159.7,
   "input_file": "C:\\Users\\joiso\\Desktop\\agente-migracao-TALP\\url.py",
   "backend": {
     "ollama_disponivel": true,
@@ -15,7 +15,7 @@
   "stages": {
     "migration": {
       "status": "validado",
-      "elapsed_s": 104.66056799888611,
+      "elapsed_s": 140.6756513118744,
       "migrated_lines": 126,
       "backend": "Ollama (llama3.1:8b)"
     },
@@ -27,11 +27,11 @@
       "backend": null
     },
     "review": {
-      "deve_reprocessar": false,
-      "achados_total": 3,
-      "elapsed_s": 398.32259035110474,
-      "error": null,
-      "backend": "Gemini 2.5 Flash (pesados) + Groq 8B (leves)"
+      "deve_reprocessar": null,
+      "achados_total": 0,
+      "elapsed_s": null,
+      "error": "[WinError 10054] Foi forçado o cancelamento de uma conexão existente pelo host remoto",
+      "backend": null
     }
   }
 }

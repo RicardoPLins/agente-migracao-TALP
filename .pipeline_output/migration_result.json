@@ -7,6 +7,6 @@
     "🔍 Validação: 4/4 critérios atendidos\n  ✓ Sem urllib legado (request/error/urlopen)\n  ✓ Com import requests\n  ✓ Sem urlopen direto\n  ✓ Código não vazio\n"
   ],
   "inferencia_semantica": "",
-  "elapsed_s": 104.66056799888611,
+  "elapsed_s": 1796.0960478782654,
   "backend": "Ollama (llama3.1:8b)"
 }
