@@ -8,7 +8,9 @@ The code migration review report highlights the findings and recommendations for
 ## 2. Findings by Severity
 
 ### 🔴 Critical (P0)
-_(none)_
+- [BLOCKER][P0] line 33 — Module has no attribute "urlencode" Trigger: AttributeError at runtime when this line executes.
+- [BLOCKER][P0] line 67 — Need type annotation for "messages" (hint: "messages: list[<type>] = ...") Trigger: type error may cause runtime failure.
+- [BLOCKER][P0] `gzip.GzipFile(fileobj=BytesIO(response.content)).read().decode('utf-8')` line 123 — second decompression corrupts data or raises error. Trigger: any response with Content-Encoding: gzip.
 
 ### 🟠 High (P1)
 - [CONTRACT][P1] `update_user` (line 94) — The function now returns the response text instead of the JSON data. Trigger: When the caller expects JSON data, it will receive the response text instead, potentially causing a TypeError or unexpected behavior.

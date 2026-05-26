@@ -6,8 +6,10 @@ principal para migration_agent e test_agent (sem custo, sem rate limit).
 Cai para Groq automaticamente se o Ollama não estiver rodando.
 
 O review_agent usa estratégia multi-LLM:
-  · Nós pesados (parser, semântico, segurança, crítico): Gemini 2.5 Flash
-  · Nós leves (classificador, lint, relatório): Groq llama-3.1-8b-instant
+  · Nós de raciocínio (semântico, crítico): Gemini 2.5 Pro
+  · Nós de análise (parser, segurança): Gemini 2.5 Flash
+  · Lint: Groq llama-3.3-70b
+  · Mecânicos (classificador, relatório): Groq llama-3.1-8b
 
 Variáveis de ambiente necessárias para o review_agent:
     GOOGLE_API_KEY — obrigatória para nós pesados (Gemini)
@@ -59,6 +61,18 @@ _OLLAMA_MODEL_PREFS = [
     "llama3",   "llama3:latest",
     "llama3.3", "llama3.3:latest",
 ]
+
+# Modelos preferidos para o review_agent (semântico → heavy)
+_REVIEW_OLLAMA_HEAVY_DEFAULT = "qwen2.5-coder:14b"
+_REVIEW_OLLAMA_LIGHT_DEFAULT = "qwen2.5-coder:3b"
+
+# ChatOllama defaults usados por migration/test — review_agent passa modelos tier explícitos
+_OLLAMA_GENERIC_DEFAULTS = frozenset({"llama3", "llama3:latest", ""})
+
+
+def _resolver_modelo_patch_ollama(model: str) -> str:
+    """Respeita modelos tier do review_agent; migration/test usam OLLAMA_MODEL detectado."""
+    return OLLAMA_MODEL if model in _OLLAMA_GENERIC_DEFAULTS else model
 
 
 def _detectar_ollama() -> tuple[bool, str]:
@@ -175,7 +189,7 @@ elif "langchain_ollama" not in sys.modules:
             hardcoda "llama3" mas só "llama3.1" está instalado).
             """
             return _NativeChatOllama(
-                model=OLLAMA_MODEL,
+                model=_resolver_modelo_patch_ollama(model),
                 temperature=temperature,
                 **kwargs,
             )
@@ -209,7 +223,11 @@ else:
     import langchain_ollama as _ollama_mod
 
     def _ollama_com_modelo_detectado(model: str = "llama3", temperature: float = 0, **kw):  # type: ignore[misc]
-        return _NativeChatOllama(model=OLLAMA_MODEL, temperature=temperature, **kw)
+        return _NativeChatOllama(
+            model=_resolver_modelo_patch_ollama(model),
+            temperature=temperature,
+            **kw,
+        )
 
     _ollama_mod.ChatOllama = _ollama_com_modelo_detectado  # type: ignore[attr-defined, misc, assignment]
 
@@ -239,6 +257,8 @@ def _import_test_agent():
 
 def _import_review_agent():
     import importlib.util
+    # Garante re-detecção de modelos Ollama quando env vars REVIEW_* foram definidas
+    sys.modules.pop("review_agent", None)
     spec = importlib.util.spec_from_file_location(
         "review_agent", REVIEW_AGENT_DIR / "review-agent.py"
     )
@@ -348,13 +368,22 @@ def run_review(original_code: str, migrated_code: str, max_retries: int = 3) -> 
     """
     Executa o review_agent diretamente (sem FastAPI).
     Estratégia multi-LLM definida internamente pelo review-agent.py:
-      · Nós pesados → Gemini 2.5 Flash (GOOGLE_API_KEY)
-      · Nós leves   → Groq llama-3.1-8b-instant (GROQ_API_KEY)
+      · Raciocínio (semântico, crítico) → Gemini 2.5 Pro
+      · Análise (parser, segurança)     → Gemini 2.5 Flash
+      · Lint                            → Groq llama-3.3-70b
+      · Mecânico (classificador, report) → Groq llama-3.1-8b
     Retry externo com backoff para erros que escapem dos retries internos.
     """
     print(f"\n{'='*60}")
     print("  ETAPA 3 — REVIEW AGENT")
-    backend_rev = f"Ollama ({OLLAMA_MODEL})" if OLLAMA_DISPONIVEL else "Gemini 2.5 Flash (nos pesados) + Groq 8B (nos leves)"
+    os.environ.setdefault("REVIEW_OLLAMA_MODEL_HEAVY", _REVIEW_OLLAMA_HEAVY_DEFAULT)
+    os.environ.setdefault("REVIEW_OLLAMA_MODEL_LIGHT", _REVIEW_OLLAMA_LIGHT_DEFAULT)
+    backend_rev = (
+        f"Ollama (heavy={os.environ['REVIEW_OLLAMA_MODEL_HEAVY']}, "
+        f"light={os.environ['REVIEW_OLLAMA_MODEL_LIGHT']})"
+        if OLLAMA_DISPONIVEL
+        else "Gemini Pro/Flash + Groq 70b/8b (tiers por nó)"
+    )
     print(f"  Backend : {backend_rev}")
     print(f"{'='*60}")
     t0 = time.time()
@@ -406,7 +435,8 @@ def run_review(original_code: str, migrated_code: str, max_retries: int = 3) -> 
     print(f"  Achados lint      : {len(result.get('achados_lint', []))}")
     print(f"  Tempo             : {elapsed:.1f}s")
 
-    return {**result, "elapsed_s": elapsed, "backend": "Gemini 2.5 Flash (pesados) + Groq 8B (leves)"}
+    backend_efetivo = result.get("backend", backend_rev)
+    return {**result, "elapsed_s": elapsed, "backend": backend_efetivo}
 
 
 # ── Pipeline principal ─────────────────────────────────────────────────────────
