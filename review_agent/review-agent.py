@@ -284,6 +284,69 @@ def _despachar_agentes(state: CodeReviewState) -> list[Send]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Trechos de código para especialistas (economia de tokens)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_DEF_RE = re.compile(r"^(\s*)def\s+(\w+)\s*\(")
+
+
+def _extrair_bloco_def(linhas: list[str], nome: str) -> tuple[int, list[str]] | None:
+    """Retorna (linha_inicial_1based, linhas_do_bloco) de uma definição def nome()."""
+    for i, linha in enumerate(linhas):
+        m = _DEF_RE.match(linha)
+        if m and m.group(2) == nome:
+            indent = m.group(1)
+            bloco = [linha]
+            for j in range(i + 1, len(linhas)):
+                prox = linhas[j]
+                if not prox.strip():
+                    bloco.append(prox)
+                    continue
+                if len(prox) - len(prox.lstrip()) <= len(indent) and _DEF_RE.match(prox):
+                    break
+                if len(prox) - len(prox.lstrip()) <= len(indent) and prox.lstrip().startswith("class "):
+                    break
+                bloco.append(prox)
+            return i + 1, bloco
+    return None
+
+
+def _extrair_trechos_funcoes(codigo_migrado: str, diff_estruturado: dict) -> str:
+    """
+    Extrai trechos numerados apenas das funções alteradas/adicionadas.
+    Evita enviar o arquivo migrado inteiro aos agentes semântica/segurança.
+    """
+    simbolos: list[str] = []
+    if isinstance(diff_estruturado, dict):
+        for chave in ("altered_functions", "added_functions"):
+            for nome in diff_estruturado.get(chave, []) or []:
+                if isinstance(nome, str) and nome not in simbolos:
+                    simbolos.append(nome)
+
+    if not simbolos:
+        return (
+            "(Nenhuma função listada no diff estruturado — "
+            "use o GIT DIFF acima como fonte primária.)"
+        )
+
+    linhas = codigo_migrado.splitlines()
+    trechos: list[str] = []
+    for nome in simbolos:
+        bloco_info = _extrair_bloco_def(linhas, nome)
+        if not bloco_info:
+            trechos.append(f"# --- `{nome}` — não encontrada no código migrado ---")
+            continue
+        inicio, bloco = bloco_info
+        fim = inicio + len(bloco) - 1
+        numeradas = [f"{inicio + k:4d}| {l}" for k, l in enumerate(bloco)]
+        trechos.append(
+            f"# --- `{nome}` (linhas {inicio}-{fim} do arquivo migrado) ---\n"
+            + "\n".join(numeradas)
+        )
+    return "\n\n".join(trechos)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Nó 4a – no_semantico
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -303,13 +366,13 @@ def no_semantico(state: CodeReviewState) -> dict:
         else ""
     )
     diff_str = json.dumps(state["diff_estruturado"], ensure_ascii=False, indent=2)
+    trechos = _extrair_trechos_funcoes(state["codigo_migrado"], state["diff_estruturado"])
     prompt = _render(
         "agente_semantica",
         critica=critica,
         diff_str=diff_str,
         raw_diff=state.get("raw_diff") or "(git diff não disponível)",
-        codigo_original=state["codigo_original"],
-        codigo_migrado=state["codigo_migrado"],
+        trechos_migrados=trechos,
     )
     response = llm.invoke(prompt)
     achados = [
@@ -339,13 +402,13 @@ def no_seguranca(state: CodeReviewState) -> dict:
         else ""
     )
     diff_str = json.dumps(state["diff_estruturado"], ensure_ascii=False, indent=2)
+    trechos = _extrair_trechos_funcoes(state["codigo_migrado"], state["diff_estruturado"])
     prompt = _render(
         "agente_seguranca",
         critica=critica,
         diff_str=diff_str,
         raw_diff=state.get("raw_diff") or "(git diff não disponível)",
-        codigo_original=state["codigo_original"],
-        codigo_migrado=state["codigo_migrado"],
+        trechos_migrados=trechos,
     )
     response = llm.invoke(prompt)
     achados = [

@@ -1,6 +1,6 @@
 {
   "description": "Semantics Agent — analyzes semantic equivalence between original and migrated code.",
-  "variables": ["critica", "diff_str", "raw_diff", "codigo_migrado", "regras_migracao"],
+  "variables": ["critica", "diff_str", "raw_diff", "trechos_migrados", "regras_migracao"],
   "skills_source": [
     {
       "skill": "Preserve API Contracts",
@@ -149,7 +149,8 @@
     "",
     "Location rules:",
     "  - ALWAYS include the affected function/method name in backticks.",
-    "  - Use line N only if you verified N by counting lines in MIGRATED CODE below (first line = 1).",
+    "  - Prefer GIT DIFF '+' lines as primary evidence; use SNIPPETS below for extra context.",
+    "  - Line numbers in snippets match the migrated file (column before '|').",
     "  - Do NOT copy line numbers from the diff hunk header — they are often wrong.",
     "  - If unsure of the line, omit `(line N)`; the review pipeline resolves location from the symbol.",
     "",
@@ -166,7 +167,7 @@
     "  - [NULL][P1] `scrapeConversation` (line 87) — direct access jsonData['payload'] without .get() can raise KeyError when payload is absent. Trigger: API error response without payload field.",
     "  - [COMPAT][P1] `mergePages` (line 120) — `break` removed from pagination loop. Trigger: loop continues after last page, duplicating or corrupting results.",
     "",
-    "Use MIGRATED CODE below to verify line numbers. Use GIT DIFF to locate '+' changes.",
+    "Use GIT DIFF for '+' changes and SNIPPETS for context. STRUCTURED DIFF lists affected symbols.",
     "Be direct: why it is a problem + the realistic scenario where it manifests.",
     "Tone: objective and helpful. No 'Great work', no 'Congratulations', no accusatory language.",
     "",
@@ -196,9 +197,9 @@
     "### STRUCTURED DIFF — context of which functions/classes changed:",
     "<<diff_str>>",
     "",
-    "### MIGRATED CODE — verify line numbers here (first line = 1):",
+    "### MIGRATED SNIPPETS — altered functions only (line numbers = migrated file):",
     "```python",
-    "<<codigo_migrado>>",
+    "<<trechos_migrados>>",
     "```"
   ]
 }

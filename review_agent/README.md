@@ -219,7 +219,7 @@ A LLM frequentemente erra números de linha (especialmente ao copiar do hunk do 
 
 Os achados corrigidos aparecem em `achados_semantica` / `achados_seguranca` / `achados_lint` (strings) e em `achados_estruturados` (JSON com `linha`, `linha_llm`, `linha_corrigida`).
 
-Os prompts de semântica e segurança agora incluem o **código migrado completo** para a LLM validar linhas; mesmo assim, a correção pós-processamento garante localização confiável pelo nome da função.
+Semântica e segurança recebem **trechos numerados** só das funções em `altered_functions` / `added_functions` (`<<trechos_migrados>>`), não o arquivo migrado inteiro — economia de tokens mantendo contexto local. O lint continua com `codigo_migrado` completo (Ruff + anti-patterns).
 
 
 ---
@@ -284,7 +284,7 @@ Para alterar as regras, edite apenas `prompts/regras_migracao.txt`.
 | -------------------------------- | ------------------------------------------------------------------------------------------ |
 | `parser.json`                    | `<<codigo_original>>`, `<<codigo_migrado>>`, `<<raw_diff>>`                                |
 | `classificador.json`             | `<<diff_str>>`                                                                             |
-| `agente_semantica.json`          | `<<critica>>`, `<<diff_str>>`, `<<raw_diff>>`, `<<codigo_migrado>>`, `<<regras_migracao>>` |
+| `agente_semantica.json`          | `<<critica>>`, `<<diff_str>>`, `<<raw_diff>>`, `<<trechos_migrados>>`, `<<regras_migracao>>` |
 | `agente_seguranca.json`          | idem semântica |
 | `agente_lint_config.json`        | `<<codigo_original>>` |
 | `agente_lint_interpretacao.json` | `<<critica>>`, `<<novos_issues>>`, `<<estilo_inferido>>`, `<<codigo_migrado>>`, `<<regras_migracao>>` |

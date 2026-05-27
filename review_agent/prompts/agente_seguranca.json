@@ -1,6 +1,6 @@
 {
   "description": "Security Agent — audits security risks introduced by the migration.",
-  "variables": ["critica", "diff_str", "raw_diff", "codigo_migrado", "regras_migracao"],
+  "variables": ["critica", "diff_str", "raw_diff", "trechos_migrados", "regras_migracao"],
   "skills_source": [
     {
       "skill": "Secure Auth and Logging",
@@ -112,7 +112,8 @@
     "",
     "Location rules:",
     "  - ALWAYS include the affected function/method name in backticks.",
-    "  - Use line N only if you verified N by counting lines in MIGRATED CODE below (first line = 1).",
+    "  - Prefer GIT DIFF '+' lines as primary evidence; use SNIPPETS below for extra context.",
+    "  - Line numbers in snippets match the migrated file (column before '|').",
     "  - Do NOT copy line numbers from the diff hunk header — they are often wrong.",
     "  - If unsure of the line, omit `(line N)`; the review pipeline resolves location from the symbol.",
     "",
@@ -126,7 +127,7 @@
     "  [P2] — Medium: security best practices not followed; no direct exploitation visible.",
     "  [P3] — Low/Informational: hardening observation; does not block the merge.",
     "",
-    "Use MIGRATED CODE below to verify line numbers. Use GIT DIFF to locate '+' changes.",
+    "Use GIT DIFF for '+' changes and SNIPPETS for context. STRUCTURED DIFF lists affected symbols.",
     "Be direct: what is the risk + how it would be exploited or where it would manifest.",
     "Tone: objective and technical. No alarmist language, no filler phrases.",
     "",
@@ -157,9 +158,9 @@
     "### STRUCTURED DIFF — context of which functions/classes changed:",
     "<<diff_str>>",
     "",
-    "### MIGRATED CODE — verify line numbers here (first line = 1):",
+    "### MIGRATED SNIPPETS — altered functions only (line numbers = migrated file):",
     "```python",
-    "<<codigo_migrado>>",
+    "<<trechos_migrados>>",
     "```"
   ]
 }
