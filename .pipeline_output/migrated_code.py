@@ -1,237 +1,164 @@
-"""
-Legacy requests-based HTTP client module.
-This file intentionally contains multiple requests usages
-for migration and refactoring practice.
-"""
-
-import json
-import ssl
-import time
 import requests
-from requests.adapters import HTTPAdapter
-from requests.exceptions import HTTPError, ConnectionError, Timeout, RequestException
-
-
-BASE_URL = "https://api.example.com"
-DEFAULT_TIMEOUT = 10
-
-
-def create_ssl_context():
-    context = ssl.create_default_context()
-    context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE
-    return context
-
-
-def build_headers(token=None):
-    headers = {
-        "User-Agent": "LegacyClient/1.0",
-        "Accept": "application/json",
-    }
-
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    return headers
-
-
-def encode_query(params):
-    return requests.compat.urlencode(params)
-
-
-def build_url(path, params=None):
-    url = f"{BASE_URL}/{path}"
-
-    if params:
-        query = encode_query(params)
-        url = f"{url}?{query}"
-
-    return url
-
-
-def fetch_users():
-    url = build_url("users")
-
-    response = requests.get(url, timeout=DEFAULT_TIMEOUT)
-
-    return response.json()
-
-
-def fetch_user_by_id(user_id):
-    url = build_url(f"users/{user_id}")
-
-    response = requests.get(url, headers=build_headers())
-
-    return response.json()
-
-
-def create_user(payload, token):
-    url = build_url("users")
-
-    data = json.dumps(payload)
-
-    response = requests.post(url, data=data, headers=build_headers(token))
-
-    return response.json()
-
-
-def update_user(user_id, payload, token):
-    url = build_url(f"users/{user_id}")
-
-    data = json.dumps(payload)
-
-    response = requests.put(url, data=data, headers=build_headers(token))
-
-    return response.text
-
-
-def delete_user(user_id, token):
-    url = build_url(f"users/{user_id}")
-
-    response = requests.delete(url, headers=build_headers(token))
-
-    return response.status_code
-
-
-def download_report(report_id, output_file):
-    url = build_url(f"reports/{report_id}/download")
-
-    response = requests.get(url)
-
-    with open(output_file, "wb") as file:
-        file.write(response.content)
-
-
-def send_form_data(form):
-    url = build_url("forms/submit")
-
-    response = requests.post(url, data=form)
-
-    return response.text
-
-
-def upload_metrics(metrics):
-    url = build_url("metrics")
-
-    data = json.dumps(metrics)
-
-    response = requests.post(url, data=data, headers={"Content-Type": "application/json"})
-
-    return response.json()
-
-
-def fetch_with_retry(path, retries=3):
-    url = build_url(path)
-
-    for attempt in range(retries):
-        try:
-            response = requests.get(url)
-
-            return response.text
-
-        except ConnectionError:
-            print(f"Retry {attempt + 1}")
-            time.sleep(1)
-
-    return None
-
-
-def configure_proxy():
-    proxies = {
-        "http": "http://proxy.local:8080",
-        "https": "http://proxy.local:8080",
-    }
-
-    adapter = HTTPAdapter()
-    session = requests.Session()
-    session.proxies = proxies
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-
-
-def ping_service():
-    url = build_url("health")
-
-    response = requests.get(url)
-
-    return response.status_code == 200
-
-
-def fetch_binary_asset(asset_id):
-    url = build_url(f"assets/{asset_id}")
-
-    response = requests.get(url)
-
-    return response.content
-
-
-def fetch_headers():
-    url = build_url("headers")
-
-    response = requests.get(url)
-
-    return dict(response.headers)
-
-
-def submit_feedback(message, email):
-    url = build_url("feedback")
-
-    payload = {
-        "message": message,
-        "email": email,
-    }
-
-    data = json.dumps(payload)
-
-    response = requests.post(url, data=data, headers={"Content-Type": "application/json"})
-
-    return response.text
-
-
-def fetch_secure_data():
-    url = build_url("secure")
-
-    response = requests.get(url, verify=False)
-
-    return response.text
-
-
-def execute_batch_requests(ids):
-    results = []
-
-    for item_id in ids:
-        url = build_url(f"items/{item_id}")
-
-        response = requests.get(url)
-
-        results.append(response.json())
-
-    return results
-
-
-def main():
-    configure_proxy()
-
-    users = fetch_users()
-
-    print("Users:", users)
-
-    health = ping_service()
-
-    print("Service healthy:", health)
-
-    metrics = {
-        "cpu": 45,
-        "memory": 70,
-    }
-
-    upload_metrics(metrics)
-
-    submit_feedback(
-        message="System running correctly",
-        email="admin@example.com"
-    )
-
+import gzip
+import os
+import json
+import sys
+import time
+import argparse
+import configparser
+import logging
+
+class ConversationScraper:
+    REQUEST_WAIT = 10
+    ERROR_WAIT = 30
+    CONVERSATION_ENDMARK = "end_of_history"
+
+    def __init__(self, convID, cookie, fb_dtsg, outDir):
+        self._directory = outDir + "/" + str(convID) + "/"
+        self._convID = convID
+        self._cookie = cookie
+        self._fb_dtsg = fb_dtsg
+
+    def generateRequestData(self, offset, timestamp, chunkSize):
+        dataForm = {"messages[user_ids][" + str(self._convID) + "][offset]": str(offset),
+                     "messages[user_ids][" + str(self._convID) + "][timestamp]": timestamp,
+                     "messages[user_ids][" + str(self._convID) + "][limit]": str(chunkSize),
+                     "client": "web_messenger",
+                     "__a": "",
+                     "__dyn": "",
+                     "__req": "",
+                     "fb_dtsg": self._fb_dtsg}
+        return dataForm
+
+    def executeRequest(self, requestData):
+        headers = {"Host": "www.facebook.com",
+                   "Origin":"http://www.facebook.com",
+                   "Referer":"https://www.facebook.com",
+                   "accept-encoding": "gzip,deflate",
+                   "accept-language": "en-US,en;q=0.8",
+                   "cookie": self._cookie,
+                   "pragma": "no-cache",
+                   "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_9_3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/37.0.2062.122 Safari/537.36",
+                   "content-type": "application/x-www-form-urlencoded",
+                   "accept": "*/*",
+                   "cache-control": "no-cache"}
+        url = "https://www.facebook.com/ajax/mercury/thread_info.php"
+        start = time.time()
+        response = requests.post(url, data=requestData, headers=headers)
+        end = time.time()
+        logging.info("Retrieved in {0:.2f}s".format(end-start))
+        if response.status_code != 200:
+            logging.error("Response error. Status code: {}".format(response.status_code))
+            logging.error(response.text)
+            logging.info("Retrying in " + str(self.ERROR_WAIT) + " seconds")
+            time.sleep(self.ERROR_WAIT)
+            return None
+        return response.text
+
+    def writeMessages(self, messages):
+        with open(self._directory + "conversation.json", 'w') as conv:
+            conv.write(json.dumps(messages))
+        command = "python -mjson.tool " + self._directory + "conversation.json > " + self._directory + "conversation.pretty.json"
+        os.system(command)
+
+    def scrapeConversation(self, merge, offset, timestampOffset, chunkSize, limit):
+        if not os.path.exists(self._directory):
+            if merge:
+                logging.error("Conversation not present. Merge operation not possible")
+                return
+            os.makedirs(self._directory)
+
+        logging.info("Starting scraping of conversation {}".format(self._convID))
+
+        messages = []
+        if merge:
+            with open(self._directory + "conversation.json") as conv:
+                convMessages = json.load(conv)
+        msgsData = ""
+        timestamp = "" if timestampOffset == 0 else str(timestampOffset)
+        numMsgs = 0
+        while self.CONVERSATION_ENDMARK not in msgsData:
+            requestChunkSize = chunkSize if limit <= 0 else min(chunkSize, limit-numMsgs)
+            reqData = self.generateRequestData(offset, timestamp, requestChunkSize)
+            logging.info("Retrieving messages " + str(offset) + "-" + str(requestChunkSize+offset))
+            response = self.executeRequest(reqData)
+            if response is None:
+                continue
+            jsonData = json.loads(response)
+
+            if jsonData and jsonData['payload']:
+                actions = jsonData['payload']['actions']
+
+                if merge and convMessages and convMessages[-1]["timestamp"] > actions[0]["timestamp"]:
+                    for i, action in enumerate(actions):
+                        if convMessages[-1]["timestamp"] == actions[i]["timestamp"]:
+                            messages = convMessages + actions[i+1:-1] + messages
+                            break
+                    break
+
+                if len(messages) == 0:
+                    messages = actions
+                else:
+                    messages = actions[:-1] + messages
+
+                timestamp = str(actions[0]["timestamp"])
+                numMsgs += len(actions)
+            else:
+                logging.error("Response error. Empty data or payload")
+                logging.error(response)
+                logging.info("Retrying in " + str(self.ERROR_WAIT) + " seconds")
+                time.sleep(self.ERROR_WAIT)
+                continue
+
+            offset += chunkSize
+            if limit!= 0 and numMsgs >= limit:
+                break
+
+            time.sleep(self.REQUEST_WAIT)
+
+        logging.info("Conversation scraped successfully. {} messages retrieved".format(len(messages)))
+
+        self.writeMessages(messages)
+
+def main(_):
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+
+    parser = argparse.ArgumentParser(description='Conversation Scraper')
+    parser.add_argument('--id', metavar='conversationID', dest='convID', required=True)
+    parser.add_argument('--size', metavar='chunkSize', type=int, dest='chunkSize', default=2000,
+                        help="number of messages to retrieve for each request")
+    parser.add_argument('--off', metavar='offset', type=int, dest='offset', default=0,
+                        help="messages number scraping offset")
+    parser.add_argument('--date', metavar='offset', type=int, dest='timestampOffset', default=0,
+                        help="messages timestamp scraping offset, has precedence over messages number offset")
+    parser.add_argument('--limit', type=int, dest='limit', default=0,
+                        help="number of messages to be retrieved")
+    parser.add_argument('-m', dest='merge', action='store_true',
+                        help="merge the new messages with previously scraped conversation")
+    parser.set_defaults(merge=False)
+    parser.add_argument('--out', metavar='outputDir', dest='outDir', default='..\\..\\Messages')
+    parser.add_argument('--conf', metavar='configFilepath', dest='configFilepath', default='..\\..\\config.ini')
+
+    args = parser.parse_args()
+    convID = args.convID
+    chunkSize = args.chunkSize
+    timestampOffset = args.timestampOffset
+    offset = args.offset
+    limit = args.limit
+    merge = args.merge
+    outDir = args.outDir
+    configFilepath = args.configFilepath
+
+    DATA_SECTION = "User Data"
+    config = configparser.ConfigParser(interpolation=None)
+    config.read(configFilepath)
+
+    cookie = config.get(DATA_SECTION, "Cookie")
+    fb_dtsg = config.get(DATA_SECTION, "Fb_dtsg")
+
+    scraper = ConversationScraper(convID, cookie, fb_dtsg, outDir)
+    scraper.scrapeConversation(merge, offset, timestampOffset, chunkSize, limit)
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])
