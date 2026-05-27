@@ -34,7 +34,7 @@ MIN_BASELINE          = 3
 llm = ChatOpenAI(
     api_key=os.getenv("PROVIDER_API_KEY"),
     base_url=os.getenv("PROVIDER_BASE_URL"),
-    model="meta-llama/llama-4-scout-17b-16e-instruct",
+    model="llama-3.3-70b-versatile",
     temperature=0.0,
     max_tokens=4096,
 )
@@ -75,7 +75,9 @@ Return ONLY valid JSON with exactly this structure — no markdown, no explanati
     "raises_on_network_error": <true|false>,
     "generateRequestData_return_type": <"bytes"|"dict"|"str"|"other">,
     "local_imports": [],
-    "missing_imports": []
+    "missing_imports": [],
+    "module_style": "functions" | "class",
+    "main_class_name": "<nome da classe ou null>"
   },
   "migrated": {
     "uses_gzip": <true|false>,
@@ -199,11 +201,16 @@ import responses
 import requests
 from unittest.mock import MagicMock, patch
 import pytest
-from original_module import ConversationScraper as OriginalConversationScraper
-from migrated_module import ConversationScraper as MigratedConversationScraper
+Read MODULE QUIRKS to decide:
 
-CRITICAL: ALWAYS use OriginalConversationScraper and MigratedConversationScraper.
-NEVER use bare ConversationScraper.
+If module_style == "functions":
+  Import only the functions you actually use, e.g.:
+    from original_module import fetch_users, create_user
+  DO NOT import ConversationScraper — it does not exist.
+
+If module_style == "class":
+  from original_module import {main_class_name} as OriginalClass
+  from migrated_module import {main_class_name} as MigratedClass
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RULE #7 — OUTPUT FORMAT
