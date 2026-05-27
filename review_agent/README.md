@@ -106,7 +106,7 @@ API_3=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | `LANGSMITH_PROJECT` | Nome do projeto no LangSmith                      | Não         |
 
 
-> **Integração com `test_pipeline.py`:** o pipeline carrega `review_agent/review-agent.py` via `REVIEW_AGENT_DIR` e valida também `GROQ_API_KEY` e `GOOGLE_API_KEY` antes de chamar o review. Defina as três chaves no `.env` ou use `--skip-review`. Ver [REPLICACAO.md](../REPLICACAO.md).
+> **Integração com `test_pipeline.py`:** o pipeline carrega `review_agent/review-agent.py` via `REVIEW_AGENT_DIR` e exige `API_3` antes de executar o review. Para o pipeline completo, configure também `GROQ_API_KEY` (migration) e `PROVIDER_*` (test). Ver [REPLICACAO.md](../REPLICACAO.md).
 
 ---
 
@@ -118,18 +118,16 @@ API_3=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 ```bash
 source .venv/bin/activate
-export API_3="$GROQ_API_KEY"   # ou valor direto no .env
 python review_agent/testReviewAgent.py
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-$env:API_3 = $env:GROQ_API_KEY
 python review_agent\testReviewAgent.py
 ```
 
-Usa `review_agent/test1/original.py` e `review_agent/test1/migrado.py`.
+Defina `API_3` no `.env` antes de executar. Usa `review_agent/test1/original.py` e `review_agent/test1/migrado.py`.
 
 ### API FastAPI
 

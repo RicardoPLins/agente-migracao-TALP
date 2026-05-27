@@ -119,7 +119,30 @@ Também expõe API FastAPI em `/review` e `/review/files`. Detalhes em [review_a
 
 ## Quick start
 
-Para instruções de como usar o sistema acesse[REPLICACAO.md](REPLICACAO.md#5-configurar-chaves-de-api-e-modelos)):
+```bash
+cd /path/to/agente-migracao-TALP
+python -m venv .venv
+source .venv/bin/activate          # Windows: .\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+pip install -r review_agent/requirements.txt
+```
+
+Crie `.env` na raiz (detalhes em [REPLICACAO.md](REPLICACAO.md#5-configurar-chaves-de-api-e-modelos)):
+
+```env
+GROQ_API_KEY=gsk_...
+API_3=gsk_...
+PROVIDER_API_KEY=gsk_...
+PROVIDER_BASE_URL=https://api.groq.com/openai/v1
+```
+
+Execute o pipeline completo:
+
+```bash
+python test_pipeline.py
+```
+
+Opções úteis: `--skip-test`, `--skip-review`, `--input meu_codigo.py`, `--examples 5`.
 
 ---
 
