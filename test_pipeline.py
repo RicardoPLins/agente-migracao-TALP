@@ -2,27 +2,22 @@
 Pipeline de Integração: migration_agent → test_agent → review_agent
 
 Detecta automaticamente se o Ollama está disponível e o usa como backend
-principal para migration_agent e test_agent (sem custo, sem rate limit).
-Cai para Groq automaticamente se o Ollama não estiver rodando.
+do migration_agent (sem custo, sem rate limit). Cai para Groq se Ollama
+não estiver rodando.
 
-O review_agent usa estratégia multi-LLM:
-  · Nós de raciocínio (semântico, crítico): Gemini 2.5 Pro
-  · Nós de análise (parser, segurança): Gemini 2.5 Flash
-  · Lint: Groq llama-3.3-70b
-  · Mecânicos (classificador, relatório): Groq llama-3.1-8b
-
-Variáveis de ambiente necessárias para o review_agent:
-    GOOGLE_API_KEY — obrigatória para nós pesados (Gemini)
-    GROQ_API_KEY   — obrigatória para nós leves (Groq 8B)
+O review_agent usa Groq em todos os nós via API_3 (llama-3.3-70b-versatile).
+O test_agent usa PROVIDER_API_KEY + PROVIDER_BASE_URL (API OpenAI-compatível).
 
 Uso:
     python test_pipeline.py [--input url.py] [--output-dir .pipeline_output]
 
 Variáveis de ambiente:
-    GROQ_API_KEY   — obrigatória se Ollama não estiver disponível,
-                     ou se review não for pulado (--skip-review)
-    OLLAMA_MODEL   — modelo Ollama a usar (padrão: detectado automaticamente)
-    OLLAMA_HOST    — host do Ollama (padrão: http://localhost:11434)
+    API_3            — obrigatória para o review_agent (chave Groq)
+    GROQ_API_KEY     — obrigatória se Ollama não estiver disponível (migration)
+    PROVIDER_API_KEY — obrigatória para o test_agent
+    PROVIDER_BASE_URL — URL base do test_agent (ex.: Groq OpenAI endpoint)
+    OLLAMA_MODEL     — modelo Ollama (padrão: detectado automaticamente)
+    OLLAMA_HOST      — host do Ollama (padrão: http://localhost:11434)
 """
 
 from __future__ import annotations
@@ -62,16 +57,12 @@ _OLLAMA_MODEL_PREFS = [
     "llama3.3", "llama3.3:latest",
 ]
 
-# Modelos preferidos para o review_agent (semântico → heavy)
-_REVIEW_OLLAMA_HEAVY_DEFAULT = "qwen2.5-coder:14b"
-_REVIEW_OLLAMA_LIGHT_DEFAULT = "qwen2.5-coder:3b"
-
-# ChatOllama defaults usados por migration/test — review_agent passa modelos tier explícitos
+# ChatOllama defaults usados pelo migration_agent
 _OLLAMA_GENERIC_DEFAULTS = frozenset({"llama3", "llama3:latest", ""})
 
 
 def _resolver_modelo_patch_ollama(model: str) -> str:
-    """Respeita modelos tier do review_agent; migration/test usam OLLAMA_MODEL detectado."""
+    """Força OLLAMA_MODEL detectado quando o agente usa default genérico."""
     return OLLAMA_MODEL if model in _OLLAMA_GENERIC_DEFAULTS else model
 
 
@@ -126,11 +117,12 @@ GROQ_API_KEY = (
     or os.getenv("GROQ_KEY")
     or os.getenv("API_KEY")
 )
+API_3 = os.getenv("API_3")
 
 if OLLAMA_DISPONIVEL:
     print(f"  [Ollama] Disponivel — modelo: {OLLAMA_MODEL}")
-    print("  Migration + Test usarao Ollama (sem rate limit)")
-    print("  Review usara Ollama local tambem (sem rate limit, sem API keys)")
+    print("  Migration usara Ollama (sem rate limit)")
+    print("  Review usara Groq via API_3")
 else:
     print("  [Ollama] Nao disponivel — usando Groq para todos os agentes")
     if not GROQ_API_KEY:
@@ -367,38 +359,20 @@ def run_test(original_code: str, migrated_code: str) -> dict:
 def run_review(original_code: str, migrated_code: str, max_retries: int = 3) -> dict:
     """
     Executa o review_agent diretamente (sem FastAPI).
-    Estratégia multi-LLM definida internamente pelo review-agent.py:
-      · Raciocínio (semântico, crítico) → Gemini 2.5 Pro
-      · Análise (parser, segurança)     → Gemini 2.5 Flash
-      · Lint                            → Groq llama-3.3-70b
-      · Mecânico (classificador, report) → Groq llama-3.1-8b
+    Todos os nós usam Groq llama-3.3-70b-versatile via API_3.
     Retry externo com backoff para erros que escapem dos retries internos.
     """
     print(f"\n{'='*60}")
     print("  ETAPA 3 — REVIEW AGENT")
-    os.environ.setdefault("REVIEW_OLLAMA_MODEL_HEAVY", _REVIEW_OLLAMA_HEAVY_DEFAULT)
-    os.environ.setdefault("REVIEW_OLLAMA_MODEL_LIGHT", _REVIEW_OLLAMA_LIGHT_DEFAULT)
-    backend_rev = (
-        f"Ollama (heavy={os.environ['REVIEW_OLLAMA_MODEL_HEAVY']}, "
-        f"light={os.environ['REVIEW_OLLAMA_MODEL_LIGHT']})"
-        if OLLAMA_DISPONIVEL
-        else "Gemini Pro/Flash + Groq 70b/8b (tiers por nó)"
-    )
+    backend_rev = "Groq (llama-3.3-70b-versatile via API_3)"
     print(f"  Backend : {backend_rev}")
     print(f"{'='*60}")
     t0 = time.time()
 
-    google_key = os.getenv("GOOGLE_API_KEY")
-    if not GROQ_API_KEY or not google_key:
-        faltando = []
-        if not GROQ_API_KEY:
-            faltando.append("GROQ_API_KEY (nós leves: classificador, lint, relatório)")
-        if not google_key:
-            faltando.append("GOOGLE_API_KEY (nós pesados: parser, semântico, segurança, crítico)")
+    if not API_3:
         raise RuntimeError(
-            "Chaves de API ausentes para o review_agent:\n" +
-            "\n".join(f"  · {k}" for k in faltando) +
-            "\nDefina as chaves no .env ou use --skip-review para pular esta etapa."
+            "API_3 não encontrada — obrigatória para o review_agent.\n"
+            "Defina API_3 no .env (mesma chave Groq) ou use --skip-review."
         )
 
     ra = _import_review_agent()
@@ -588,7 +562,6 @@ def main():
 
     # ── ETAPA: Review ─────────────────────────────────────────────────────────
     if not args.skip_review:
-        # Review usa Gemini (pesados) + Groq 8B (leves) — pausa para Groq nos leves
         wait_review = 10 if not OLLAMA_DISPONIVEL else 5
         print(f"\n  Aguardando {wait_review}s antes do review (Groq rate limit)...")
         time.sleep(wait_review)
@@ -622,12 +595,10 @@ def main():
             "ollama_disponivel": OLLAMA_DISPONIVEL,
             "ollama_model": OLLAMA_MODEL if OLLAMA_DISPONIVEL else None,
             "groq_usado_em": (
-                ["migration", "test", "review-leves"] if not OLLAMA_DISPONIVEL
-                else (["review-leves"] if not args.skip_review else [])
+                ["migration", "review"] if not OLLAMA_DISPONIVEL
+                else (["review"] if not args.skip_review else [])
             ),
-            "gemini_usado_em": (
-                ["review-pesados"] if not args.skip_review else []
-            ),
+            "review_api_key": "API_3" if not args.skip_review else None,
         },
         "stages": {
             "migration": {

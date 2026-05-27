@@ -137,7 +137,7 @@ pip install -r requirements.txt
 pip install -r review_agent/requirements.txt
 ```
 
-O `review_agent/requirements.txt` inclui pacotes extras (`langchain-google-genai`, `ruff`, `mypy`, etc.) usados pelo agente de revisão.
+O `review_agent/requirements.txt` inclui pacotes extras (`ruff`, `mypy`, etc.) usados pelo agente de revisão.
 
 ### Verificar instalação
 
@@ -156,17 +156,14 @@ O pipeline usa **três backends de LLM** distintos. Crie um arquivo `.env` na **
 ```env
 # ── Groq (migration fallback + review_agent) ──────────────────────────────
 GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
-API_3=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxx          # outra chave groq — review_agent lê API_3
+API_3=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxx          # review_agent lê API_3
 
 # ── Test agent (API compatível com OpenAI) ────────────────────────────────
 PROVIDER_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
 PROVIDER_BASE_URL=https://api.groq.com/openai/v1
-
-# ── Validação do test_pipeline (obrigatória se review não for pulado) ───────
-GOOGLE_API_KEY=AIzaxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
-> **Importante:** o `review_agent/review-agent.py` na `main` usa **apenas Groq** via variável `API_3` (modelo `llama-3.3-70b-versatile`). O `test_pipeline.py` ainda valida `GOOGLE_API_KEY` antes de chamar o review — defina-a mesmo que o review atual não use Gemini, ou use `--skip-review`.
+> **Dica:** `GROQ_API_KEY`, `API_3` e `PROVIDER_API_KEY` podem ser a **mesma chave Groq** quando tudo roda via Groq.
 
 ### Tabela de variáveis que tem que ter no .env
 
@@ -177,7 +174,6 @@ GOOGLE_API_KEY=AIzaxxxxxxxxxxxxxxxxxxxxxxxxxx
 | `API_3`             | review                    | Sim, se `--skip-review` não for usado | Mesma chave Groq — nome exigido pelo código do review    |
 | `PROVIDER_API_KEY`  | test                      | Sim                                   | Chave do provedor OpenAI-compatível                      |
 | `PROVIDER_BASE_URL` | test                      | Sim                                   | URL base da API (Groq: `https://api.groq.com/openai/v1`) |
-| `GOOGLE_API_KEY`    | test_pipeline (validação) | Sim, se review rodar                  | Chave Google AI — validada pelo script de integração     |
 | `OLLAMA_HOST`       | migration                 | Não                                   | Padrão: `http://localhost:11434`                         |
 | `OLLAMA_MODEL`      | migration                 | Não                                   | Modelo Ollama preferido (ex.: `llama3.1`)                |
 
@@ -198,18 +194,11 @@ GOOGLE_API_KEY=AIzaxxxxxxxxxxxxxxxxxxxxxxxxxx
 Modelos usados via Groq neste projeto:
 
 
-| Componente           | Modelo                                      |
-| -------------------- | ------------------------------------------- |
-| migration (fallback) | `llama-3.3-70b-versatile`                   |
+| Componente           | Modelo                    |
+| -------------------- | ------------------------- |
+| migration (fallback) | `llama-3.3-70b-versatile` |
 | test agent           | `llama-3.3-70b-versatile` |
-| review agent         | `llama-3.3-70b-versatile` (todos os nós)    |
-
-
-#### Google AI (`GOOGLE_API_KEY`)
-
-1. Acesse [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
-2. Clique em **Create API Key**
-3. Copie a chave (prefixo `AIza`)
+| review agent         | `llama-3.3-70b-versatile` |
 
 
 ### Alternativa: variáveis na sessão (sem `.env`)
@@ -221,7 +210,6 @@ export GROQ_API_KEY="gsk_..."
 export API_3="gsk_..."
 export PROVIDER_API_KEY="gsk_..."
 export PROVIDER_BASE_URL="https://api.groq.com/openai/v1"
-export GOOGLE_API_KEY="AIza..."
 ```
 
 **Windows (PowerShell):**
@@ -231,7 +219,6 @@ $env:GROQ_API_KEY       = "gsk_..."
 $env:API_3              = "gsk_..."
 $env:PROVIDER_API_KEY   = "gsk_..."
 $env:PROVIDER_BASE_URL  = "https://api.groq.com/openai/v1"
-$env:GOOGLE_API_KEY     = "AIza..."
 ```
 
 ---
@@ -298,9 +285,6 @@ python test_pipeline.py
 
 `PYTHONUTF8` evita `UnicodeEncodeError` com emojis nos logs do Windows.
 
-
-```
-
 ### Saída esperada (resumida)
 
 ```
@@ -354,8 +338,9 @@ Com `test_pipeline.py`, os artefatos ficam em `.pipeline_output/`:
 | `review_report.md`      | Relatório consolidado de revisão          |
 | `review_result.json`    | Achados brutos por categoria              |
 | `pipeline_summary.json` | Sumário de todas as etapas                |
-| `pasta generetedtests`  | Contem os testes feitos pela LLM
-| `debug.txt`             | detalhe sobre os testes
+| `pasta generetedtests`  | Contem os testes feitos pela LLM          |
+| `debug.txt`             | detalhe sobre os testes                   |
+
 
 ### Visualizar relatório
 
@@ -372,7 +357,6 @@ Get-Content .pipeline_output\review_report.md
 ```
 
 ---
-
 
 ## 9. Solução de problemas
 
@@ -398,9 +382,9 @@ Defina `API_3` no `.env` com a mesma chave Groq de `GROQ_API_KEY`:
 API_3=gsk_...
 ```
 
-### `RuntimeError: Chaves de API ausentes` (GOOGLE_API_KEY / GROQ_API_KEY)
+### `RuntimeError: API_3 não encontrada`
 
-- Defina todas as variáveis da [seção 5](#5-configurar-chaves-de-api-e-modelos), ou
+- Defina `API_3` no `.env` (mesma chave Groq de `GROQ_API_KEY`), ou
 - Execute com `--skip-review` se só quiser migration + test
 
 ### `groq.RateLimitError: 429`
@@ -487,7 +471,6 @@ agente-migracao-TALP/
 - [LangGraph — Documentação oficial](https://langchain-ai.github.io/langgraph/)
 - [Groq — Console e API Keys](https://console.groq.com/)
 - [Groq — OpenAI-compatible API](https://console.groq.com/docs/openai)
-- [Google AI Studio — API Keys](https://aistudio.google.com/apikey)
 - [Ollama — Download e modelos](https://ollama.com/)
 - [Ruff — Linter Python](https://docs.astral.sh/ruff/)
 

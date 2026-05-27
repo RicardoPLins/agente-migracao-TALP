@@ -65,8 +65,6 @@ Artefatos por iteração: `migrated_code_iter1.py`, `migration_result_iter1.json
 | **test_agent** | `ChatOpenAI` via API compatível com OpenAI | `PROVIDER_API_KEY`, `PROVIDER_BASE_URL` |
 | **review_agent** | Groq `llama-3.3-70b-versatile` em todos os nós | `API_3` |
 
-> **Inconsistência conhecida:** `test_pipeline.py` valida `GOOGLE_API_KEY` + `GROQ_API_KEY` antes do review, mas `review-agent.py` na `main` lê apenas `API_3`. Defina `API_3` com a mesma chave Groq. Use `--skip-review` se não quiser configurar `GOOGLE_API_KEY`.
-
 > **Ollama e test agent:** o monkey-patch de `ChatOllama` afeta só o `migration_agent`. O `test_agent` usa `PROVIDER_*` diretamente — Ollama **não** substitui o test agent automaticamente.
 
 ### Detecção automática de Ollama
@@ -94,7 +92,7 @@ Na `main`, todos os nós (`parser`, `classificador`, `semantico`, `seguranca`, `
 ChatGroq(api_key=os.getenv("API_3"), model_name="llama-3.3-70b-versatile")
 ```
 
-O `test_pipeline.py` ainda exibe "Gemini Pro/Flash + Groq" nos logs quando Ollama está off — isso reflete documentação/comentários antigos, não o código atual do review.
+O `test_pipeline.py` valida `API_3` antes de chamar o review e exibe `Groq (llama-3.3-70b-versatile via API_3)` nos logs.
 
 ### Rate limit
 
@@ -113,10 +111,9 @@ GROQ_API_KEY=gsk_...
 API_3=gsk_...                              # review_agent (mesma chave Groq)
 PROVIDER_API_KEY=gsk_...
 PROVIDER_BASE_URL=https://api.groq.com/openai/v1
-GOOGLE_API_KEY=AIza...                     # validada pelo test_pipeline se review rodar
 ```
 
-Opcionais: `OLLAMA_HOST`, `OLLAMA_MODEL`, `REVIEW_OLLAMA_MODEL_HEAVY`, `REVIEW_OLLAMA_MODEL_LIGHT`.
+Opcionais: `OLLAMA_HOST`, `OLLAMA_MODEL`.
 
 ---
 

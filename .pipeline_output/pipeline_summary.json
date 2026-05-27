@@ -1,39 +1,36 @@
 {
-  "pipeline_start": "2026-05-26T11:12:14.052543",
-  "total_elapsed_s": 60.0,
-  "input_file": "/Users/ricardo/agente-migracao-TALP/url.py",
+  "pipeline_start": "2026-05-27T15:41:18.231951",
+  "total_elapsed_s": 175.2,
+  "input_file": "C:\\Users\\joiso\\OneDrive\\Área de Trabalho\\workspace\\agente-migracao-TALP\\url.py",
   "backend": {
     "ollama_disponivel": false,
     "ollama_model": null,
     "groq_usado_em": [
       "migration",
-      "test",
-      "review-leves"
+      "review"
     ],
-    "gemini_usado_em": [
-      "review-pesados"
-    ]
+    "review_api_key": "API_3"
   },
   "stages": {
     "migration": {
       "status": "validado",
-      "elapsed_s": 5.199571132659912,
-      "migrated_lines": 237,
+      "elapsed_s": 9.628615379333496,
+      "migrated_lines": 164,
       "backend": "Groq (llama-3.1-8b-instant)"
     },
     "test": {
       "decision": "APPROVED",
       "iteration": 0,
-      "elapsed_s": 22.228880882263184,
+      "elapsed_s": 99.22994565963745,
       "error": null,
       "backend": "Groq (llama-3.3-70b-versatile)"
     },
     "review": {
       "deve_reprocessar": false,
-      "achados_total": 28,
-      "elapsed_s": 12.575612783432007,
+      "achados_total": 6,
+      "elapsed_s": 46.26730561256409,
       "error": null,
-      "backend": "Gemini 2.5 Flash (pesados) + Groq 8B (leves)"
+      "backend": "Groq (llama-3.3-70b-versatile via API_3)"
     }
   }
 }
