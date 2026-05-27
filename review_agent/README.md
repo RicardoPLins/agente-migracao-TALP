@@ -47,7 +47,7 @@ Entrada (original + migrado)
 | `no_seguranca`     | Autenticação, validação de inputs, superfície de ataque         | Sim        |
 | `no_lint`          | Ruff via `subprocess`; LLM interpreta regressões novas          | Sim        |
 | `no_critico`       | Meta-avaliador; aprova ou pede refinamento                      | Sim        |
-| `relatorio_final`  | Consolida achados em Markdown com veredito                      | Sim        |
+| `relatorio_final`  | Template Markdown determinístico (seções 2–6) + resumo executivo LLM | Parcial |
 
 
 Todos os nós com LLM usam a mesma instância:
@@ -191,9 +191,35 @@ python test_pipeline.py --skip-review
 | `achados_semantica` | string[] | Achados com severidade [P0]–[P3]                 |
 | `achados_seguranca` | string[] | Riscos de segurança [P0]–[P3]                    |
 | `achados_lint`      | string[] | Regressões de lint/style                         |
+| `achados_estruturados` | object[] | Achados parseados (severidade, símbolo, linha corrigida) |
 | `iteracoes`         | int      | Rodadas do reflection loop (máx. 3)              |
 | `deve_reprocessar`  | bool     | `true` → migration_agent deve refazer a migração |
 | `relatorio_final`   | string   | Relatório Markdown consolidado                   |
+
+### Template do `review_report.md`
+
+O nó `relatorio_final` **não** delega o relatório inteiro ao LLM. A estrutura é montada em Python (`_gerar_relatorio_markdown`):
+
+1. **Legenda P0–P3** — tabela com significado e ação recomendada
+2. **Resumo executivo** — única parte gerada pelo LLM (`relatorio_final.json`)
+3. **Veredito** — APROVADO / APROVADO COM RESSALVAS / REPROVADO / REPROCESSAR
+4. **Achados por severidade** — P0, P1, P2, P3 com emojis
+5. **Detalhamento por agente** — semântica, segurança, lint
+6. **Recomendações prioritárias** — contagem por severidade
+7. **Notas sobre linhas** — explica a correção automática
+
+### Correção de linhas (`achados_estruturados`)
+
+A LLM frequentemente erra números de linha (especialmente ao copiar do hunk do diff). O pipeline:
+
+1. Faz parse de cada achado (`[PREFIX][Px] \`funcao\` (line N) — …`)
+2. Indexa `def nome()` no código migrado
+3. Quando o símbolo existe, **substitui** a linha pela definição real
+4. Anota _(modelo citou linha N)_ quando houve divergência
+
+Os achados corrigidos aparecem em `achados_semantica` / `achados_seguranca` / `achados_lint` (strings) e em `achados_estruturados` (JSON com `linha`, `linha_llm`, `linha_corrigida`).
+
+Os prompts de semântica e segurança agora incluem o **código migrado completo** para a LLM validar linhas; mesmo assim, a correção pós-processamento garante localização confiável pelo nome da função.
 
 
 ---
@@ -203,6 +229,7 @@ python test_pipeline.py --skip-review
 ```
 review_agent/
 ├── prompts/
+│   ├── regras_migracao.txt          # Contrato fixo urllib→requests (injetado nos prompts)
 │   ├── parser.json
 │   ├── classificador.json
 │   ├── agente_semantica.json
@@ -237,6 +264,19 @@ review_agent/
 | `[COSMÉTICO]`, `[NAMING]`                | P3    | Sugestão; não bloqueia                 |
 
 
+### Contrato de migração (`regras_migracao.txt`)
+
+Texto fixo com as 9 regras urllib→requests (espelhando o contrato do `migration_agent`, **sem importar código dele**). Injetado automaticamente em `_render()` via placeholder `<<regras_migracao>>` nos prompts:
+
+| Prompt | Uso |
+|---|---|
+| `agente_semantica.json` | Checklist de equivalência funcional |
+| `agente_seguranca.json` | Regras 6, 8 e 9 (POST, Request, Session) |
+| `agente_lint_interpretacao.json` | Cruzamento antes dos anti-patterns |
+| `no_critico.json` | Validar achados P0/P1 contra o contrato |
+
+Para alterar as regras, edite apenas `prompts/regras_migracao.txt`.
+
 ### Placeholders por nó
 
 
@@ -244,12 +284,12 @@ review_agent/
 | -------------------------------- | ------------------------------------------------------------------------------------------ |
 | `parser.json`                    | `<<codigo_original>>`, `<<codigo_migrado>>`, `<<raw_diff>>`                                |
 | `classificador.json`             | `<<diff_str>>`                                                                             |
-| `agente_semantica.json`          | `<<critica>>`, `<<diff_str>>`, `<<raw_diff>>`, `<<codigo_original>>`, `<<codigo_migrado>>` |
-| `agente_seguranca.json`          | idem semântica                                                                             |
-| `agente_lint_config.json`        | `<<codigo_original>>`                                                                      |
-| `agente_lint_interpretacao.json` | `<<critica>>`, `<<novos_issues>>`, `<<estilo_inferido>>`, `<<codigo_migrado>>`             |
-| `no_critico.json`                | `<<iteracao>>`, `<<achados_str>>`                                                          |
-| `relatorio_final.json`           | `<<achados_str>>`, `<<diff_str>>`                                                          |
+| `agente_semantica.json`          | `<<critica>>`, `<<diff_str>>`, `<<raw_diff>>`, `<<codigo_migrado>>`, `<<regras_migracao>>` |
+| `agente_seguranca.json`          | idem semântica |
+| `agente_lint_config.json`        | `<<codigo_original>>` |
+| `agente_lint_interpretacao.json` | `<<critica>>`, `<<novos_issues>>`, `<<estilo_inferido>>`, `<<codigo_migrado>>`, `<<regras_migracao>>` |
+| `no_critico.json`                | `<<iteracao>>`, `<<achados_str>>`, `<<regras_migracao>>` |
+| `relatorio_final.json`           | `<<achados_resumo>>`, `<<deve_reprocessar>>` (apenas resumo executivo) |
 
 
 `<<critica>>` é preenchido pelo `no_critico` nas iterações de refinamento; na primeira rodada fica vazio.

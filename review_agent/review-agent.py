@@ -16,11 +16,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 from collections import Counter
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Any, Literal, TypedDict
 
 from fastapi import FastAPI, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -45,11 +46,20 @@ def _load_prompts() -> None:
         _PROMPTS[path.stem] = data["template"]
 
 
+def _load_regras_migracao() -> str:
+    """Contrato fixo urllib→requests usado pelos prompts de revisão (não altera migration_agent)."""
+    path = _PROMPTS_DIR / "regras_migracao.txt"
+    if path.exists():
+        return path.read_text(encoding="utf-8").strip()
+    return ""
+
+
 def _render(key: str, **kwargs: str) -> str:
     """
     Renderiza um template de prompt substituindo os placeholders <<variavel>>
     pelos valores fornecidos.
     """
+    kwargs.setdefault("regras_migracao", _REGRAS_MIGRACAO)
     text = "\n".join(_PROMPTS[key])
     for var, val in kwargs.items():
         text = text.replace(f"<<{var}>>", val)
@@ -57,6 +67,7 @@ def _render(key: str, **kwargs: str) -> str:
 
 
 _load_prompts()
+_REGRAS_MIGRACAO = _load_regras_migracao()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -568,49 +579,329 @@ def _rota_pos_critico(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Nó 6 – Relatório Final
+# Relatório final — template determinístico + correção de linhas
 # ─────────────────────────────────────────────────────────────────────────────
+
+ACHADO_RE = re.compile(
+    r"^-\s*\[(?P<prefix>[^\]]+)\]\[(?P<sev>P[0-3])\]\s*"
+    r"(?:`(?P<symbol>[^`]+)`\s*)?"
+    r"(?:\((?:line|linha)\s+(?P<line_paren>\d+)\)|(?:\b(?:line|linha)\s+(?P<line_plain>\d+)))?"
+    r"\s*[—–-]\s*(?P<body>.+)$",
+    re.IGNORECASE,
+)
+
+_LEGENDA_SEVERIDADE = """\
+| Nível | Etiqueta | Significado | Ação recomendada |
+|-------|----------|-------------|------------------|
+| **P0** | Crítico | Quebra funcional garantida em runtime (crash, perda de dados) | Corrigir **antes** do merge |
+| **P1** | Alto | Mudança silenciosa de comportamento em produção | Corrigir **antes** do merge |
+| **P2** | Médio | Qualidade, manutenibilidade ou robustez | Corrigir se possível |
+| **P3** | Baixo | Sugestão ou cosmético | Opcional |
+"""
+
+
+def _indice_simbolos_migrado(codigo_migrado: str) -> dict[str, int]:
+    """Mapeia nomes de funções/métodos para a linha de definição no código migrado."""
+    indice: dict[str, int] = {}
+    for num, linha in enumerate(codigo_migrado.splitlines(), start=1):
+        m = re.match(r"^\s*def\s+(\w+)\s*\(", linha)
+        if m:
+            indice[m.group(1)] = num
+    return indice
+
+
+def _parse_achado(raw: str, agente: str) -> dict[str, Any]:
+    """Extrai campos estruturados de uma linha de achado."""
+    raw = raw.strip()
+    base: dict[str, Any] = {
+        "raw": raw,
+        "agente": agente,
+        "prefixo": "",
+        "severidade": "P3",
+        "simbolo": None,
+        "linha_llm": None,
+        "linha": None,
+        "linha_corrigida": False,
+        "descricao": raw.lstrip("- ").strip(),
+        "trigger": "",
+        "formatado": raw,
+    }
+    if not raw.startswith("- "):
+        return base
+
+    m = ACHADO_RE.match(raw)
+    if not m:
+        return base
+
+    body = m.group("body").strip()
+    trigger = ""
+    if re.search(r"\bTrigger\s*:", body, re.IGNORECASE):
+        partes = re.split(r"\.\s*Trigger\s*:", body, maxsplit=1, flags=re.IGNORECASE)
+        if len(partes) == 2:
+            body, trigger = partes[0].strip(), partes[1].strip()
+
+    linha_llm = m.group("line_paren") or m.group("line_plain")
+    return {
+        **base,
+        "prefixo": m.group("prefix"),
+        "severidade": m.group("sev").upper(),
+        "simbolo": m.group("symbol"),
+        "linha_llm": int(linha_llm) if linha_llm else None,
+        "descricao": body,
+        "trigger": trigger,
+    }
+
+
+def _corrigir_linha_achado(achado: dict[str, Any], indice: dict[str, int]) -> dict[str, Any]:
+    """Prefere linha real da definição do símbolo no código migrado."""
+    simbolo = achado.get("simbolo")
+    linha_llm = achado.get("linha_llm")
+    linha = linha_llm
+
+    if simbolo and simbolo in indice:
+        linha_real = indice[simbolo]
+        if linha_llm is None or linha_llm != linha_real:
+            achado["linha_corrigida"] = linha_llm is not None and linha_llm != linha_real
+        linha = linha_real
+
+    achado["linha"] = linha
+    achado["formatado"] = _formatar_achado(achado)
+    return achado
+
+
+def _formatar_achado(achado: dict[str, Any]) -> str:
+    prefixo = achado.get("prefixo") or "INFO"
+    sev = achado.get("severidade") or "P3"
+    simbolo = achado.get("simbolo")
+    linha = achado.get("linha")
+    desc = achado.get("descricao") or achado.get("raw", "").lstrip("- ").strip()
+    trigger = achado.get("trigger", "")
+
+    partes = [f"- [{prefixo}][{sev}]"]
+    if simbolo:
+        partes.append(f"`{simbolo}`")
+    if linha:
+        sufixo = ""
+        if achado.get("linha_corrigida") and achado.get("linha_llm"):
+            sufixo = f" _(modelo citou linha {achado['linha_llm']})_"
+        partes.append(f"(linha {linha}){sufixo}")
+    partes.append(f"— {desc}")
+    if trigger:
+        partes.append(f"Trigger: {trigger}")
+    return " ".join(partes)
+
+
+def _normalizar_achados(
+    achados: list[str], agente: str, codigo_migrado: str
+) -> tuple[list[str], list[dict[str, Any]]]:
+    indice = _indice_simbolos_migrado(codigo_migrado)
+    formatados: list[str] = []
+    estruturados: list[dict[str, Any]] = []
+    for raw in achados:
+        parsed = _corrigir_linha_achado(_parse_achado(raw, agente), indice)
+        estruturados.append(parsed)
+        formatados.append(parsed["formatado"])
+    return formatados, estruturados
+
+
+def _contar_severidades(achados: list[dict[str, Any]]) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for a in achados:
+        if a.get("raw", "").startswith("- ["):
+            counts[a.get("severidade", "P3")] += 1
+    return counts
+
+
+def _veredito(deve_reprocessar: bool, counts: Counter[str]) -> str:
+    if deve_reprocessar:
+        return "🔄 **REPROCESSAR** — o migration_agent deve refazer a migração"
+    if counts.get("P0", 0) > 0:
+        return "❌ **REPROVADO** — corrigir achados P0 antes do merge"
+    if counts.get("P1", 0) > 0:
+        return "⚠️ **APROVADO COM RESSALVAS** — corrigir achados P1"
+    return "✅ **APROVADO**"
+
+
+def _secao_por_severidade(
+    titulo: str, emoji: str, sev: str, achados: list[dict[str, Any]]
+) -> str:
+    itens = [a for a in achados if a.get("severidade") == sev and a.get("raw", "").startswith("- [")]
+    linhas = [a["formatado"] for a in itens]
+    corpo = "\n".join(linhas) if linhas else "_(nenhum achado)_"
+    return f"### {emoji} {titulo} ({sev})\n\n{corpo}\n"
+
+
+def _secao_agente(titulo: str, achados: list[str]) -> str:
+    if not achados:
+        return f"### {titulo}\n\n_(nenhum achado)_\n"
+    return f"### {titulo}\n\n" + "\n".join(achados) + "\n"
+
+
+def _gerar_resumo_executivo_llm(
+    llm: ChatGroq,
+    achados_resumo: str,
+    deve_reprocessar: bool,
+    veredito: str,
+) -> str:
+    prompt = _render(
+        "relatorio_final",
+        achados_resumo=achados_resumo,
+        deve_reprocessar=str(deve_reprocessar),
+    )
+    try:
+        response = llm.invoke(prompt)
+        texto = (response.content or "").strip()
+        return texto or f"Veredito: {veredito}"
+    except Exception:
+        return f"Veredito: {veredito}"
+
+
+def _gerar_relatorio_markdown(state: CodeReviewState, resumo_executivo: str) -> str:
+    codigo_migrado = state["codigo_migrado"]
+    deve_reprocessar = bool(state.get("deve_reprocessar"))
+
+    sem_fmt, sem_est = _normalizar_achados(
+        state.get("achados_semantica", []), "semantica", codigo_migrado
+    )
+    seg_fmt, seg_est = _normalizar_achados(
+        state.get("achados_seguranca", []), "seguranca", codigo_migrado
+    )
+    lint_fmt, lint_est = _normalizar_achados(
+        state.get("achados_lint", []), "lint", codigo_migrado
+    )
+    todos = sem_est + seg_est + lint_est
+    counts = _contar_severidades(todos)
+    veredito = _veredito(deve_reprocessar, counts)
+    iteracoes = state.get("iteracao", 0)
+    agentes = ", ".join(state.get("agentes_acionados", [])) or "—"
+    diff = state.get("diff_estruturado", {})
+    impacto = diff.get("impact_summary", "—") if isinstance(diff, dict) else "—"
+
+    partes: list[str] = [
+        "# Relatório de Revisão — Migração de Código",
+        "",
+        "## Legenda de severidade",
+        "",
+        _LEGENDA_SEVERIDADE,
+        "",
+        "---",
+        "",
+        "## 1. Resumo executivo",
+        "",
+        resumo_executivo,
+        "",
+        "## 2. Veredito",
+        "",
+        veredito,
+        "",
+        f"- **Iterações do reflection loop:** {iteracoes}",
+        f"- **Agentes acionados:** {agentes}",
+        f"- **Impacto (parser):** {impacto}",
+        "",
+        "---",
+        "",
+        "## 3. Achados por severidade",
+        "",
+        _secao_por_severidade("Crítico", "🔴", "P0", todos),
+        _secao_por_severidade("Alto", "🟠", "P1", todos),
+        _secao_por_severidade("Médio", "🟡", "P2", todos),
+        _secao_por_severidade("Baixo / Cosmético", "🟢", "P3", todos),
+        "---",
+        "",
+        "## 4. Detalhamento por agente",
+        "",
+        _secao_agente("Semântica", sem_fmt),
+        _secao_agente("Segurança", seg_fmt),
+        _secao_agente("Lint / Style", lint_fmt),
+        "---",
+        "",
+        "## 5. Recomendações prioritárias",
+        "",
+    ]
+
+    recs: list[str] = []
+    if counts.get("P0"):
+        recs.append(f"1. Corrigir **{counts['P0']}** achado(s) **P0** (bloqueadores de runtime).")
+    if counts.get("P1"):
+        recs.append(f"{len(recs)+1}. Revisar **{counts['P1']}** achado(s) **P1** (mudança silenciosa de comportamento).")
+    if counts.get("P2"):
+        recs.append(f"{len(recs)+1}. Avaliar **{counts['P2']}** achado(s) **P2** (qualidade/robustez).")
+    if deve_reprocessar:
+        recs.append(f"{len(recs)+1}. **Reexecutar migration_agent** antes de nova revisão.")
+    if not recs:
+        recs.append("Nenhuma ação bloqueante identificada.")
+
+    partes.append("\n".join(recs))
+    partes.extend(["", "---", "", "## 6. Notas sobre localização de linhas", ""])
+    partes.append(
+        "Linhas foram **corrigidas automaticamente** quando o achado cita um símbolo "
+        "(`função`) — usa-se a linha da definição `def` no código migrado. "
+        "Quando o modelo citou linha diferente, aparece _(modelo citou linha N)_."
+    )
+
+    if deve_reprocessar:
+        aviso = (
+            "> ⚠️ **AÇÃO REQUERIDA:** o no_critico esgotou 3 iterações com problemas "
+            "críticos pendentes. O **migration_agent** deve refazer a migração.\n\n"
+        )
+        return aviso + "\n".join(partes)
+
+    return "\n".join(partes)
+
+
+def _achados_estruturados(state: CodeReviewState) -> list[dict[str, Any]]:
+    codigo = state["codigo_migrado"]
+    resultado: list[dict[str, Any]] = []
+    for agente, chave in (
+        ("semantica", "achados_semantica"),
+        ("seguranca", "achados_seguranca"),
+        ("lint", "achados_lint"),
+    ):
+        _, est = _normalizar_achados(state.get(chave, []), agente, codigo)
+        resultado.extend(est)
+    return resultado
+
 
 def no_relatorio_final(state: CodeReviewState) -> dict:
     """
-    Consolida todos os achados validados em um relatório Markdown estruturado.
-    A IA NÃO corrige o código — apenas reporta e orienta.
-
-    Quando `deve_reprocessar = True`, antecipa um cabeçalho de alerta indicando
-    que o migration_agent deve ser acionado novamente.
+    Consolida achados em Markdown com template determinístico (seções 1–6).
+    O LLM gera apenas o resumo executivo (2–3 frases); linhas são corrigidas
+    via índice de símbolos do código migrado.
     """
     llm = _get_llm()
+    codigo_migrado = state["codigo_migrado"]
 
-    achados_str = "\n".join([
-        "### Semântica:",
-        *state.get("achados_semantica", ["(não acionado)"]),
-        "",
-        "### Segurança:",
-        *state.get("achados_seguranca", ["(não acionado)"]),
-        "",
-        "### Lint/Style:",
-        *state.get("achados_lint", ["(não acionado)"]),
+    sem_fmt, _ = _normalizar_achados(state.get("achados_semantica", []), "semantica", codigo_migrado)
+    seg_fmt, _ = _normalizar_achados(state.get("achados_seguranca", []), "seguranca", codigo_migrado)
+    lint_fmt, _ = _normalizar_achados(state.get("achados_lint", []), "lint", codigo_migrado)
+
+    state_norm: CodeReviewState = {
+        **state,
+        "achados_semantica": sem_fmt,
+        "achados_seguranca": seg_fmt,
+        "achados_lint": lint_fmt,
+    }
+
+    achados_resumo = "\n".join([
+        "### Semântica:", *(sem_fmt or ["(nenhum)"]), "",
+        "### Segurança:", *(seg_fmt or ["(nenhum)"]), "",
+        "### Lint:", *(lint_fmt or ["(nenhum)"]),
     ])
-    diff_str = json.dumps(state.get("diff_estruturado", {}), ensure_ascii=False, indent=2)
+    todos = _achados_estruturados(state_norm)
+    veredito = _veredito(bool(state.get("deve_reprocessar")), _contar_severidades(todos))
 
-    prompt = _render(
-        "relatorio_final",
-        achados_str=achados_str,
-        diff_str=diff_str,
+    resumo = _gerar_resumo_executivo_llm(
+        llm, achados_resumo, bool(state.get("deve_reprocessar")), veredito
     )
-    response = llm.invoke(prompt)
+    relatorio = _gerar_relatorio_markdown(state_norm, resumo)
 
-    conteudo = response.content
-    if state.get("deve_reprocessar"):
-        aviso = (
-            "# ⚠️ AÇÃO REQUERIDA: Reprocessamento pelo Migration Agent\n\n"
-            "> O no_critico avaliou **3 iterações** de refinamento e ainda identificou "
-            "problemas críticos. A migração deve ser refeita pelo **migration_agent** "
-            "antes de uma nova revisão.\n\n---\n\n"
-        )
-        conteudo = aviso + conteudo
+    return {
+        "relatorio_final": relatorio,
+        "achados_semantica": sem_fmt,
+        "achados_seguranca": seg_fmt,
+        "achados_lint": lint_fmt,
+    }
 
-    return {"relatorio_final": conteudo}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -697,6 +988,8 @@ def _executar_grafo(codigo_original: str, codigo_migrado: str) -> dict:
         "relatorio_final":   "",
     }
     result = graph.invoke(initial_state)
+    estado_final: CodeReviewState = {**initial_state, **result}
+    estruturados = _achados_estruturados(estado_final)
     return {
         "raw_diff":          result.get("raw_diff", ""),
         "diff":              result.get("diff_estruturado", {}),
@@ -704,6 +997,7 @@ def _executar_grafo(codigo_original: str, codigo_migrado: str) -> dict:
         "achados_semantica": result.get("achados_semantica", []),
         "achados_seguranca": result.get("achados_seguranca", []),
         "achados_lint":      result.get("achados_lint", []),
+        "achados_estruturados": estruturados,
         "iteracoes":         result.get("iteracao", 0),
         "deve_reprocessar":  result.get("deve_reprocessar", False),
         "relatorio_final":   result.get("relatorio_final", ""),

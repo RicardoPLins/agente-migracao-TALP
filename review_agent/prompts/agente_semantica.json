@@ -1,6 +1,6 @@
 {
   "description": "Semantics Agent — analyzes semantic equivalence between original and migrated code.",
-  "variables": ["critica", "diff_str", "raw_diff"],
+  "variables": ["critica", "diff_str", "raw_diff", "codigo_migrado", "regras_migracao"],
   "skills_source": [
     {
       "skill": "Preserve API Contracts",
@@ -56,6 +56,14 @@
     "  include the finding with an explicit note of what remains uncertain.",
     "- You only see the diff hunks, not the full codebase. Avoid suggesting that something",
     "  might be duplicated or missing in other parts of the code.",
+    "",
+    "══════════════════════════════════════════════════════════════",
+    "MIGRATION CONTRACT — urllib → requests (fixed rules)",
+    "══════════════════════════════════════════════════════════════",
+    "The migration_agent follows the contract below. Verify whether '+' lines",
+    "comply. Report violations as [CONTRACT] or [COMPAT] with diff evidence.",
+    "",
+    "<<regras_migracao>>",
     "",
     "══════════════════════════════════════════════════════════════",
     "STEP 0 — Infer migration context from the structured diff",
@@ -137,7 +145,13 @@
     "FORMAT FOR EACH FINDING",
     "══════════════════════════════════════════════════════════════",
     "For each problem found, produce ONE line in the format:",
-    "- [PREFIX][SEVERITY] `affected_function` (line N of migrated) — direct description of the problem. Trigger: <concrete input scenario or condition that would cause the defect>.",
+    "- [PREFIX][SEVERITY] `affected_function` (line N) — direct description of the problem. Trigger: <concrete input scenario or condition that would cause the defect>.",
+    "",
+    "Location rules:",
+    "  - ALWAYS include the affected function/method name in backticks.",
+    "  - Use line N only if you verified N by counting lines in MIGRATED CODE below (first line = 1).",
+    "  - Do NOT copy line numbers from the diff hunk header — they are often wrong.",
+    "  - If unsure of the line, omit `(line N)`; the review pipeline resolves location from the symbol.",
     "",
     "Prefixes: [CONTRACT] | [NULL] | [COMPAT]",
     "",
@@ -152,7 +166,7 @@
     "  - [NULL][P1] `scrapeConversation` (line 87) — direct access jsonData['payload'] without .get() can raise KeyError when payload is absent. Trigger: API error response without payload field.",
     "  - [COMPAT][P1] `mergePages` (line 120) — `break` removed from pagination loop. Trigger: loop continues after last page, duplicating or corrupting results.",
     "",
-    "Use the GIT DIFF below to identify the exact line number (number column in the __new hunk__).",
+    "Use MIGRATED CODE below to verify line numbers. Use GIT DIFF to locate '+' changes.",
     "Be direct: why it is a problem + the realistic scenario where it manifests.",
     "Tone: objective and helpful. No 'Great work', no 'Congratulations', no accusatory language.",
     "",
@@ -180,6 +194,11 @@
     "```",
     "",
     "### STRUCTURED DIFF — context of which functions/classes changed:",
-    "<<diff_str>>"
+    "<<diff_str>>",
+    "",
+    "### MIGRATED CODE — verify line numbers here (first line = 1):",
+    "```python",
+    "<<codigo_migrado>>",
+    "```"
   ]
 }
