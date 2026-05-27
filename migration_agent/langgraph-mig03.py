@@ -62,7 +62,6 @@ else:
 # API_KEY = os.getenv("API_KEY")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 URL_MIGRATE_PATH = PROJECT_ROOT / "url-migrate.py"
-INFERENCE_JSON_PATH = PROJECT_ROOT / "inferencia.json"
 
 # When this file is imported (e.g., by the API gateway), avoid writing files.
 WRITE_ARTIFACTS = __name__ == "__main__"
