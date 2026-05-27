@@ -119,43 +119,10 @@ Também expõe API FastAPI em `/review` e `/review/files`. Detalhes em [review_a
 
 ## Quick start
 
-```bash
-cd /path/to/agente-migracao-TALP
-python -m venv .venv
-source .venv/bin/activate          # Windows: .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-pip install -r review_agent/requirements.txt
-```
-
-Crie `.env` na raiz (detalhes em [REPLICACAO.md](REPLICACAO.md#5-configurar-chaves-de-api-e-modelos)):
-
-```env
-GROQ_API_KEY=gsk_...
-API_3=gsk_...
-PROVIDER_API_KEY=gsk_...
-PROVIDER_BASE_URL=https://api.groq.com/openai/v1
-GOOGLE_API_KEY=AIza...
-```
-
-Execute o pipeline completo com test_pipeline.py
-
-Opções úteis: `--skip-test`, `--skip-review`, `--input meu_codigo.py`, `--examples 5`.
+Para instruções de como usar o sistema acesse[REPLICACAO.md](REPLICACAO.md#5-configurar-chaves-de-api-e-modelos)):
 
 ---
 
-## Saídas
-
-
-| Arquivo                                  | Descrição                  |
-| ---------------------------------------- | -------------------------- |
-| `.pipeline_output/migrated_code.py`      | Código migrado             |
-| `.pipeline_output/test_report.md`        | Relatório de equivalência  |
-| `.pipeline_output/review_report.md`      | Relatório de revisão       |
-| `.pipeline_output/pipeline_summary.json` | Sumário de todas as etapas |
-|                                          |                            |
-
-
----
 
 ## Documentação adicional
 
@@ -169,11 +136,4 @@ Opções úteis: `--skip-test`, `--skip-review`, `--input meu_codigo.py`, `--exa
 
 
 ---
-
-## Troubleshooting
-
-- **Ollama connection refused:** execute `ollama serve` e `ollama pull llama3.1`.
-- **Groq rate limits (429):** use Ollama no migration, aguarde o reset ou use `--skip-review`.
-- **Relatório de teste vazio:** confirme `pytest`, `pytest-cov` e código Python válido (sem marcadores de merge `<<<<<<<`).
-- **Setup completo:** veja [REPLICACAO.md](REPLICACAO.md#10-solução-de-problemas).
 
