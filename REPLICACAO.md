@@ -201,7 +201,7 @@ Modelos usados via Groq neste projeto:
 | Componente           | Modelo                                      |
 | -------------------- | ------------------------------------------- |
 | migration (fallback) | `llama-3.3-70b-versatile`                   |
-| test agent           | `meta-llama/llama-4-scout-17b-16e-instruct` |
+| test agent           | `llama-3.3-70b-versatile` |
 | review agent         | `llama-3.3-70b-versatile` (todos os nós)    |
 
 
@@ -211,32 +211,6 @@ Modelos usados via Groq neste projeto:
 2. Clique em **Create API Key**
 3. Copie a chave (prefixo `AIza`)
 
-Necessária hoje porque `test_pipeline.py` valida sua presença antes de executar o review. Documentação futura do `review_agent` prevê Gemini nos nós pesados — quando isso for implementado, a chave passará a ser usada de fato.
-
-#### Outros provedores OpenAI-compatíveis (test agent)
-
-O `test_agent` usa `ChatOpenAI` com `PROVIDER_BASE_URL` + `PROVIDER_API_KEY`. Alternativas:
-
-
-| Provedor    | `PROVIDER_BASE_URL`              | Como obter chave                                 |
-| ----------- | -------------------------------- | ------------------------------------------------ |
-| Groq        | `https://api.groq.com/openai/v1` | [console.groq.com](https://console.groq.com/)    |
-| OpenRouter  | `https://openrouter.ai/api/v1`   | [openrouter.ai/keys](https://openrouter.ai/keys) |
-| Together AI | `https://api.together.xyz/v1`    | [api.together.xyz](https://api.together.xyz/)    |
-
-
-Ajuste o modelo em `test_agent/agent/agent.py` (`model=...`) se trocar de provedor.
-
-### Limites das contas gratuitas (Groq)
-
-
-| Modelo                    | Tokens/min (TPM) | Tokens/dia (TPD) |
-| ------------------------- | ---------------- | ---------------- |
-| `llama-3.1-8b-instant`    | 6.000            | 500.000          |
-| `llama-3.3-70b-versatile` | 6.000            | 100.000          |
-
-
-Reset diário às **00:00 UTC** (21:00 horário de Brasília).
 
 ### Alternativa: variáveis na sessão (sem `.env`)
 
@@ -262,7 +236,7 @@ $env:GOOGLE_API_KEY     = "AIza..."
 
 ---
 
-## 6. Ollama (opcional, recomendado)
+## 6. Ollama (opcional)
 
 O Ollama reduz custo e rate limits no **migration_agent**. O **test_agent** usa `PROVIDER`_* independentemente; o **review_agent** na `main` usa Groq via `API_3`.
 
@@ -302,7 +276,7 @@ Se Ollama estiver ativo, `test_pipeline.py` detecta automaticamente e usa LLM lo
 
 ---
 
-## 7. Executar o pipeline completo
+## 7. Executar o Sistema completo
 
 Retorne à raiz do repositório com o venv ativo.
 
@@ -324,23 +298,7 @@ python test_pipeline.py
 
 `PYTHONUTF8` evita `UnicodeEncodeError` com emojis nos logs do Windows.
 
-### Opções úteis
 
-```bash
-# Mais rápido: pula test_agent
-python test_pipeline.py --skip-test
-
-# Sem review (útil se cota Groq/Google esgotada)
-python test_pipeline.py --skip-review
-
-# Entrada customizada
-python test_pipeline.py --input meu_codigo_urllib.py
-
-# Menos exemplos few-shot (economiza tokens)
-python test_pipeline.py --examples 5 --skip-test
-
-# Forçar modelo Ollama
-python test_pipeline.py --ollama-model llama3.1
 ```
 
 ### Saída esperada (resumida)
@@ -396,7 +354,8 @@ Com `test_pipeline.py`, os artefatos ficam em `.pipeline_output/`:
 | `review_report.md`      | Relatório consolidado de revisão          |
 | `review_result.json`    | Achados brutos por categoria              |
 | `pipeline_summary.json` | Sumário de todas as etapas                |
-
+| `pasta generetedtests`  | Contem os testes feitos pela LLM
+| `debug.txt`             | detalhe sobre os testes
 
 ### Visualizar relatório
 
@@ -414,57 +373,8 @@ Get-Content .pipeline_output\review_report.md
 
 ---
 
-## 9. Executar agentes individualmente
 
-### Review agent (standalone)
-
-**Linux / macOS:**
-
-```bash
-source .venv/bin/activate
-export API_3="$GROQ_API_KEY"
-python review_agent/testReviewAgent.py
-```
-
-**Windows:**
-
-```powershell
-$env:API_3 = $env:GROQ_API_KEY
-python review_agent\testReviewAgent.py
-```
-
-Usa os arquivos em `review_agent/test1/` como entrada.
-
-### Review agent (API FastAPI)
-
-```bash
-cd review_agent
-uvicorn review-agent:app --host 127.0.0.1 --port 8000 --reload
-```
-
-Swagger: `http://127.0.0.1:8000/docs`
-
-### Test agent (standalone)
-
-```bash
-python test_agent/agent/agent.py \
-  --input-json .pipeline_output/migration_result.json \
-  --output .pipeline_output/test_report.md
-```
-
-Requer `PROVIDER_API_KEY` e `PROVIDER_BASE_URL` no `.env`.
-
-### Migration agent (standalone)
-
-```bash
-python migration_agent/langgraph-mig03.py
-```
-
-Usa `url.py` como entrada padrão e grava `inferencia.json` na raiz.
-
----
-
-## 10. Solução de problemas
+## 9. Solução de problemas
 
 ### `ModuleNotFoundError`
 
@@ -531,7 +441,7 @@ curl http://localhost:11434/api/tags
 
 ---
 
-## 11. Estrutura do repositório
+## 10. Estrutura do repositório
 
 ```
 agente-migracao-TALP/
