@@ -1,6 +1,8 @@
 # Guia de Replicação — Pipeline de Migração Automatizada
 
-Este guia detalha **exatamente** os passos necessários para replicar o experimento em uma máquina nova, do zero à execução completa do pipeline `migration_agent → test_agent → review_agent`.
+Este guia descreve como replicar o experimento **do zero** em uma máquina nova (Linux, macOS ou Windows), até a execução completa do pipeline `migration_agent → test_agent → review_agent`.
+
+> **Estado atual da branch `main`:** o ponto de entrada recomendado e funcional é `test_pipeline.py` na raiz do repositório.
 
 ---
 
@@ -8,34 +10,68 @@ Este guia detalha **exatamente** os passos necessários para replicar o experime
 
 1. [Pré-requisitos de sistema](#1-pré-requisitos-de-sistema)
 2. [Clonar o repositório](#2-clonar-o-repositório)
-3. [Criar e configurar o ambiente virtual](#3-criar-e-configurar-o-ambiente-virtual)
-4. [Instalar as dependências](#4-instalar-as-dependências)
-5. [Configurar as chaves de API](#5-configurar-as-chaves-de-api)
-6. [Verificar os pré-requisitos opcionais](#6-verificar-os-pré-requisitos-opcionais)
+3. [Criar o ambiente virtual](#3-criar-o-ambiente-virtual)
+4. [Instalar dependências](#4-instalar-dependências)
+5. [Configurar chaves de API e modelos](#5-configurar-chaves-de-api-e-modelos)
+6. [Ollama (opcional, recomendado)](#6-ollama-opcional-recomendado)
 7. [Executar o pipeline completo](#7-executar-o-pipeline-completo)
-8. [Verificar os artefatos de saída](#8-verificar-os-artefatos-de-saída)
-9. [Executar apenas o review_agent (standalone)](#9-executar-apenas-o-review_agent-standalone)
-10. [Solução de problemas comuns](#10-solução-de-problemas-comuns)
-11. [Estrutura completa do repositório](#11-estrutura-completa-do-repositório)
+8. [Artefatos de saída](#8-artefatos-de-saída)
+9. [Executar agentes individualmente](#9-executar-agentes-individualmente)
+10. [Solução de problemas](#10-solução-de-problemas)
+11. [Estrutura do repositório](#11-estrutura-do-repositório)
 
 ---
 
 ## 1. Pré-requisitos de sistema
 
-| Requisito | Versão mínima | Como verificar |
-|---|---|---|
-| Python | 3.10+ | `python --version` |
-| pip | qualquer | `pip --version` |
-| git | qualquer | `git --version` |
-| Ruff | qualquer | `ruff --version` |
 
-### Instalar Ruff (se não tiver)
+| Requisito | Versão mínima | Uso                                                |
+| --------- | ------------- | -------------------------------------------------- |
+| Python    | **3.11+**     | Todos os agentes e scripts                         |
+| pip       | qualquer      | Instalação de pacotes                              |
+| git       | qualquer      | `review_agent` usa `git diff --no-index` no parser |
+| Ruff      | qualquer      | Nó de lint do `review_agent` (subprocess)          |
+
+
+### Linux (Debian/Ubuntu)
 
 ```bash
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip git
+pip install ruff   # ou: sudo apt install ruff (se disponível no seu distro)
+```
+
+### macOS
+
+```bash
+# Homebrew: https://brew.sh
+brew install python git ruff
+```
+
+Para LLM local (opcional):
+
+```bash
+brew install ollama
+```
+
+### Windows
+
+1. Instale [Python 3.11+](https://www.python.org/downloads/) — marque **“Add Python to PATH”**.
+2. Instale [Git for Windows](https://git-scm.com/download/win).
+3. Instale Ruff:
+
+```powershell
 pip install ruff
 ```
 
-> **Nota:** `git` é usado pelo `no_parser` do review_agent para gerar diffs determinísticos via `git diff --no-index`. Ele não precisa estar em um repositório — basta estar no PATH.
+### Verificar instalação
+
+```bash
+python --version    # ou: python3 --version
+pip --version
+git --version
+ruff --version
+```
 
 ---
 
@@ -46,386 +82,429 @@ git clone <url-do-repositório>
 cd agente-migracao-TALP
 ```
 
-Estrutura esperada após o clone:
+Estrutura principal após o clone:
 
 ```
 agente-migracao-TALP/
-├── migration_agent/
-│   └── langgraph-mig03.py
-├── test_agent/
-│   ├── agent/agent.py
-│   └── prompts/
-├── review_agent/
-│   ├── review-agent.py
-│   ├── prompts/
-│   └── requirements.txt
-├── dataset/
-│   └── Request-Urllib.xlsx
-├── url.py                  ← código urllib de entrada (exemplo)
-├── test_pipeline.py        ← script de integração
-└── REPLICACAO.md           ← este arquivo
+├── migration_agent/langgraph-mig03.py   # Migração urllib → requests
+├── test_agent/agent/agent.py              # Testes de equivalência funcional
+├── review_agent/review-agent.py           # Revisão semântica, segurança e lint
+├── dataset/Request-Urllib.xlsx            # Exemplos few-shot para migração
+├── url.py                                 # Código urllib de entrada (padrão)
+├── test_pipeline.py                       # Pipeline integrado (recomendado)
+├── scripts/                               # Scripts alternativos (ver nota acima)
+├── requirements.txt                       # Dependências da raiz
+└── REPLICACAO.md                          # Este guia
 ```
 
 ---
 
-## 3. Criar e configurar o ambiente virtual
+## 3. Criar o ambiente virtual
 
-O pipeline usa **um único ambiente virtual** localizado em `review_agent/.venv`. Ele concentra as dependências de todos os três agentes.
-
-### Windows (PowerShell)
-
-```powershell
-cd review_agent
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-> Se aparecer erro de política de execução:
-> ```powershell
-> Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-> ```
+Use **um único venv na raiz** (`.venv/`). Todos os agentes compartilham esse ambiente.
 
 ### Linux / macOS
 
 ```bash
-cd review_agent
+cd agente-migracao-TALP
 python3 -m venv .venv
 source .venv/bin/activate
 ```
 
----
+### Windows (PowerShell)
 
-## 4. Instalar as dependências
-
-Com o venv ativo, dentro de `review_agent/`:
-
-```bash
-# Dependências principais do review_agent (inclui langchain-google-genai)
-pip install -r requirements.txt
-
-# Dependências adicionais dos outros agentes (instaladas no mesmo venv)
-pip install openpyxl langchain-ollama langchain-openai pytest pytest-cov responses pytest-responses
+```powershell
+cd agente-migracao-TALP
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 ```
 
-> **Por que langchain-ollama se não usamos Ollama necessariamente?**
-> O `migration_agent` e o `test_agent` importam `langchain_ollama` no nível de módulo. O `test_pipeline.py` detecta Ollama automaticamente e usa o pacote nativo se disponível, ou substitui `ChatOllama` por `ChatGroq` via monkey-patch se não estiver rodando. O pacote precisa estar instalado de qualquer forma.
+Se aparecer erro de política de execução:
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+---
+
+## 4. Instalar dependências
+
+Com o venv ativo, na **raiz do repositório**:
+
+```bash
+pip install --upgrade pip
+pip install -r requirements.txt
+pip install -r review_agent/requirements.txt
+```
+
+O `review_agent/requirements.txt` inclui pacotes extras (`langchain-google-genai`, `ruff`, `mypy`, etc.) usados pelo agente de revisão.
 
 ### Verificar instalação
 
 ```bash
-python -c "import langgraph, langchain_groq, langchain_google_genai, langchain_ollama, openpyxl, fastapi; print('OK')"
+python -c "import langgraph, langchain_groq, langchain_openai, openpyxl, fastapi; print('OK')"
 ```
 
 Saída esperada: `OK`
 
 ---
 
-## 5. Configurar as chaves de API
+## 5. Configurar chaves de API e modelos
 
-O pipeline usa **dois provedores de LLM**:
-
-| Provedor | Usado por | Onde obter |
-|---|---|---|
-| **Groq** | migration_agent, test_agent (fallback), nós leves do review | [console.groq.com](https://console.groq.com/) |
-| **Google AI (Gemini)** | nós pesados do review_agent | [aistudio.google.com](https://aistudio.google.com/apikey) |
-
-### Obter a chave Groq
-
-1. Acesse [console.groq.com](https://console.groq.com/)
-2. Crie uma conta gratuita
-3. Em **API Keys**, clique em **Create API Key**
-4. Copie a chave (começa com `gsk_`)
-
-### Obter a chave Google AI
-
-1. Acesse [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
-2. Clique em **Create API Key**
-3. Copie a chave (começa com `AIza`)
-
-### Configurar
-
-**Opção A — arquivo `.env`** (recomendado para uso recorrente):
-
-Crie `agente-migracao-TALP/.env`:
+O pipeline usa **três backends de LLM** distintos. Crie um arquivo `.env` na **raiz do repositório** (não commite — já está no `.gitignore`):
 
 ```env
+# ── Groq (migration fallback + review_agent) ──────────────────────────────
 GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+API_3=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxx          # mesma chave — review_agent lê API_3
+
+# ── Test agent (API compatível com OpenAI) ────────────────────────────────
+PROVIDER_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+PROVIDER_BASE_URL=https://api.groq.com/openai/v1
+
+# ── Validação do test_pipeline (obrigatória se review não for pulado) ───────
 GOOGLE_API_KEY=AIzaxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
-**Opção B — variáveis de ambiente na sessão** (execução única):
+> **Importante:** o `review_agent/review-agent.py` na `main` usa **apenas Groq** via variável `API_3` (modelo `llama-3.3-70b-versatile`). O `test_pipeline.py` ainda valida `GOOGLE_API_KEY` antes de chamar o review — defina-a mesmo que o review atual não use Gemini, ou use `--skip-review`.
 
-```powershell
-# Windows PowerShell
-$env:GROQ_API_KEY   = "gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-$env:GOOGLE_API_KEY = "AIzaxxxxxxxxxxxxxxxxxxxxxxxxxx"
-```
+### Tabela de variáveis
+
+
+| Variável            | Agente                    | Obrigatória                           | Descrição                                                |
+| ------------------- | ------------------------- | ------------------------------------- | -------------------------------------------------------- |
+| `GROQ_API_KEY`      | migration (fallback Groq) | Sim*, se Ollama indisponível          | Chave Groq                                               |
+| `API_3`             | review                    | Sim, se `--skip-review` não for usado | Mesma chave Groq — nome exigido pelo código do review    |
+| `PROVIDER_API_KEY`  | test                      | Sim                                   | Chave do provedor OpenAI-compatível                      |
+| `PROVIDER_BASE_URL` | test                      | Sim                                   | URL base da API (Groq: `https://api.groq.com/openai/v1`) |
+| `GOOGLE_API_KEY`    | test_pipeline (validação) | Sim, se review rodar                  | Chave Google AI — validada pelo script de integração     |
+| `OLLAMA_HOST`       | migration                 | Não                                   | Padrão: `http://localhost:11434`                         |
+| `OLLAMA_MODEL`      | migration                 | Não                                   | Modelo Ollama preferido (ex.: `llama3.1`)                |
+
+
+ Se Ollama estiver rodando, o `migration_agent` usa LLM local e `GROQ_API_KEY` só é necessária para review/test.
+
+### Como obter cada chave
+
+#### Groq (`GROQ_API_KEY`, `API_3`, `PROVIDER_API_KEY`)
+
+1. Acesse [console.groq.com](https://console.groq.com/)
+2. Crie uma conta gratuita
+3. Vá em **API Keys** → **Create API Key**
+4. Copie a chave (prefixo `gsk`_)
+5. Use a **mesma chave** em `GROQ_API_KEY`, `API_3` e `PROVIDER_API_KEY`
+6. Para o test agent, defina `PROVIDER_BASE_URL=https://api.groq.com/openai/v1`
+
+Modelos usados via Groq neste projeto:
+
+
+| Componente           | Modelo                                      |
+| -------------------- | ------------------------------------------- |
+| migration (fallback) | `llama-3.3-70b-versatile`                   |
+| test agent           | `meta-llama/llama-4-scout-17b-16e-instruct` |
+| review agent         | `llama-3.3-70b-versatile` (todos os nós)    |
+
+
+#### Google AI (`GOOGLE_API_KEY`)
+
+1. Acesse [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+2. Clique em **Create API Key**
+3. Copie a chave (prefixo `AIza`)
+
+Necessária hoje porque `test_pipeline.py` valida sua presença antes de executar o review. Documentação futura do `review_agent` prevê Gemini nos nós pesados — quando isso for implementado, a chave passará a ser usada de fato.
+
+#### Outros provedores OpenAI-compatíveis (test agent)
+
+O `test_agent` usa `ChatOpenAI` com `PROVIDER_BASE_URL` + `PROVIDER_API_KEY`. Alternativas:
+
+
+| Provedor    | `PROVIDER_BASE_URL`              | Como obter chave                                 |
+| ----------- | -------------------------------- | ------------------------------------------------ |
+| Groq        | `https://api.groq.com/openai/v1` | [console.groq.com](https://console.groq.com/)    |
+| OpenRouter  | `https://openrouter.ai/api/v1`   | [openrouter.ai/keys](https://openrouter.ai/keys) |
+| Together AI | `https://api.together.xyz/v1`    | [api.together.xyz](https://api.together.xyz/)    |
+
+
+Ajuste o modelo em `test_agent/agent/agent.py` (`model=...`) se trocar de provedor.
+
+### Limites das contas gratuitas (Groq)
+
+
+| Modelo                    | Tokens/min (TPM) | Tokens/dia (TPD) |
+| ------------------------- | ---------------- | ---------------- |
+| `llama-3.1-8b-instant`    | 6.000            | 500.000          |
+| `llama-3.3-70b-versatile` | 6.000            | 100.000          |
+
+
+Reset diário às **00:00 UTC** (21:00 horário de Brasília).
+
+### Alternativa: variáveis na sessão (sem `.env`)
+
+**Linux / macOS:**
 
 ```bash
-# Linux / macOS
-export GROQ_API_KEY="gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-export GOOGLE_API_KEY="AIzaxxxxxxxxxxxxxxxxxxxxxxxxxx"
+export GROQ_API_KEY="gsk_..."
+export API_3="gsk_..."
+export PROVIDER_API_KEY="gsk_..."
+export PROVIDER_BASE_URL="https://api.groq.com/openai/v1"
+export GOOGLE_API_KEY="AIza..."
 ```
 
-### Limites das contas gratuitas
+**Windows (PowerShell):**
 
-| Provedor / Modelo | Tokens/min (TPM) | Tokens/dia (TPD) |
-|---|---|---|
-| Groq — `llama-3.1-8b-instant` | 6.000 | 500.000 |
-| Groq — `llama-3.3-70b-versatile` | 6.000 | 100.000 |
-| Google Gemini 2.5 Flash | 1.000.000 | sem limite gratuito |
-
-> Com Gemini nos nós pesados do review, os erros 429 são praticamente eliminados. A cota Groq só afeta os nós leves (classificador, lint, relatório) e os agentes de migration/test quando Ollama não está disponível.
+```powershell
+$env:GROQ_API_KEY       = "gsk_..."
+$env:API_3              = "gsk_..."
+$env:PROVIDER_API_KEY   = "gsk_..."
+$env:PROVIDER_BASE_URL  = "https://api.groq.com/openai/v1"
+$env:GOOGLE_API_KEY     = "AIza..."
+```
 
 ---
 
-## 6. Verificar os pré-requisitos opcionais
+## 6. Ollama (opcional, recomendado)
 
-### Verificar git no PATH
+O Ollama reduz custo e rate limits no **migration_agent**. O **test_agent** usa `PROVIDER_`* independentemente; o **review_agent** na `main` usa Groq via `API_3`.
 
-```bash
-git --version
-# Esperado: git version 2.x.x
-```
-
-### Verificar ruff no PATH
+### Linux
 
 ```bash
-ruff --version
-# Esperado: ruff 0.x.x
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull llama3.1
+ollama serve &
 ```
 
-Se `ruff` não estiver no PATH mas estiver instalado no venv:
+### macOS
 
 ```bash
-# O review_agent usa subprocess para chamar ruff — precisa estar no PATH global
-# Alternativa: adicionar o venv ao PATH antes de rodar
-export PATH="$PWD/review_agent/.venv/bin:$PATH"
+brew install ollama
+ollama pull llama3.1
+ollama serve &
 ```
+
+### Windows
+
+1. Baixe o instalador em [ollama.com/download](https://ollama.com/download)
+2. Instale e abra o Ollama
+3. No terminal:
+
+```powershell
+ollama pull llama3.1
+```
+
+### Verificar
+
+```bash
+curl http://localhost:11434/api/tags
+```
+
+Se Ollama estiver ativo, `test_pipeline.py` detecta automaticamente e usa LLM local no migration (sem consumir cota Groq nessa etapa).
 
 ---
 
 ## 7. Executar o pipeline completo
 
-Retorne à raiz do repositório:
+Retorne à raiz do repositório com o venv ativo.
+
+### Linux / macOS
 
 ```bash
-cd ..   # de volta a agente-migracao-TALP/
+source .venv/bin/activate
+PYTHONUTF8=1 python test_pipeline.py
 ```
 
 ### Windows (PowerShell)
 
 ```powershell
+.\.venv\Scripts\Activate.ps1
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
-# Se não criou .env:
-$env:GROQ_API_KEY   = "gsk_..."
-$env:GOOGLE_API_KEY = "AIza..."
-
-.\review_agent\.venv\Scripts\python.exe test_pipeline.py
+python test_pipeline.py
 ```
 
-### Linux / macOS
+`PYTHONUTF8` evita `UnicodeEncodeError` com emojis nos logs do Windows.
+
+### Opções úteis
 
 ```bash
-PYTHONUTF8=1 ./review_agent/.venv/bin/python test_pipeline.py
-```
-
-> As variáveis `PYTHONUTF8` e `PYTHONIOENCODING` são necessárias no Windows para que os emojis nos prints dos agentes não causem `UnicodeEncodeError` no terminal.
-
-### Modos de execução recomendados
-
-```bash
-# Execução mais rápida: pula o test_agent (~50s total)
+# Mais rápido: pula test_agent
 python test_pipeline.py --skip-test
 
-# Execução econômica em tokens: só migration + test
+# Sem review (útil se cota Groq/Google esgotada)
 python test_pipeline.py --skip-review
 
-# Usar código próprio como entrada
+# Entrada customizada
 python test_pipeline.py --input meu_codigo_urllib.py
 
-# Reduzir exemplos few-shot para economizar tokens (padrão: 10)
+# Menos exemplos few-shot (economiza tokens)
 python test_pipeline.py --examples 5 --skip-test
 
-# Forçar modelo Ollama específico (se Ollama disponível)
+# Forçar modelo Ollama
 python test_pipeline.py --ollama-model llama3.1
 ```
 
-### Saída esperada no terminal
+### Saída esperada (resumida)
 
 ```
   Detectando backend LLM disponível...
   [Ollama] Nao disponivel — usando Groq para todos os agentes
 
 ############################################################
-  PIPELINE DE INTEGRAÇÃO
-  Início: 2026-05-24 21:00:00
-  Input : .../url.py
-  Output: .../.pipeline_output
-  Ollama : NAO (usando Groq)
+  PIPELINE DE INTEGRACAO
+  Input  : .../url.py
+  Output : .../.pipeline_output
 ############################################################
 
 ============================================================
   ETAPA 1 — MIGRATION AGENT
-  Backend : Groq (llama-3.1-8b-instant)
 ============================================================
-  Carregando 10 exemplos do dataset...
   Status  : validado
-  Tempo   : ~24s
-  Linhas  : 222
+  ...
 
-  ETAPA 2 — TEST AGENT: pulada (--skip-test)
-
-  Aguardando 10s antes do review (Groq rate limit)...
+============================================================
+  ETAPA 2 — TEST AGENT
+============================================================
+  Decision: APPROVED | NEEDS_REVISION
+  ...
 
 ============================================================
   ETAPA 3 — REVIEW AGENT
-  Backend : Gemini 2.5 Flash (nos pesados) + Groq 8B (nos leves)
 ============================================================
-  Executando grafo de revisão (tentativa 1/3)...
   Agentes acionados : ['semantica', 'seguranca', 'lint']
-  Iteracoes critico : 1
   Deve reprocessar  : False
-  Achados semantica : 1
-  Achados seguranca : 0
-  Achados lint      : 0
-  Tempo             : ~46s
+  ...
 
 ############################################################
-  PIPELINE CONCLUÍDO
-  Tempo total : ~80s
-  Migration   : validado
-  Test        : skipped
-  Review      : aprovado
+  PIPELINE CONCLUIDO
   Artefatos   : .../.pipeline_output
 ############################################################
 ```
 
 ---
 
-## 8. Verificar os artefatos de saída
+## 8. Artefatos de saída
 
-Todos os artefatos ficam em `.pipeline_output/`:
+Com `test_pipeline.py`, os artefatos ficam em `.pipeline_output/`:
+
+
+| Arquivo                 | Conteúdo                                  |
+| ----------------------- | ----------------------------------------- |
+| `migrated_code.py`      | Código migrado (urllib → requests)        |
+| `migration_result.json` | Status, tempo e mensagens do migration    |
+| `test_report.md`        | Relatório de equivalência (se test rodou) |
+| `test_result.json`      | Métricas de cobertura e decisão do router |
+| `review_report.md`      | Relatório consolidado de revisão          |
+| `review_result.json`    | Achados brutos por categoria              |
+| `pipeline_summary.json` | Sumário de todas as etapas                |
+
+
+### Visualizar relatório
+
+**Linux / macOS:**
 
 ```bash
-ls .pipeline_output/
+cat .pipeline_output/review_report.md
 ```
 
-| Arquivo | O que contém |
-|---|---|
-| `migrated_code.py` | Código migrado de urllib para requests |
-| `migration_result.json` | Status, tempo e log de mensagens do migration_agent |
-| `test_report.md` | Relatório de equivalência funcional (apenas se test_agent rodou) |
-| `test_result.json` | Métricas de cobertura e equivalência (apenas se test_agent rodou) |
-| `review_report.md` | Relatório de revisão completo (semântica + segurança + lint + veredito) |
-| `review_result.json` | Achados brutos por categoria |
-| `pipeline_summary.json` | Sumário de todas as etapas com tempos e status |
+**Windows:**
 
-### Visualizar o relatório de revisão
-
-```bash
-# Linux / macOS
-cat .pipeline_output/review_report.md
-
-# Windows PowerShell
+```powershell
 Get-Content .pipeline_output\review_report.md
 ```
 
 ---
 
-## 9. Executar apenas o review_agent (standalone)
+## 9. Executar agentes individualmente
 
-O review_agent pode ser usado de forma independente — sem o migration_agent ou test_agent.
+### Review agent (standalone)
 
-### Via script de teste direto
+**Linux / macOS:**
 
-```powershell
-# Certifique-se que as chaves estão no .env ou na sessão
-.\review_agent\.venv\Scripts\python.exe .\review_agent\testReviewAgent.py
+```bash
+source .venv/bin/activate
+export API_3="$GROQ_API_KEY"
+python review_agent/testReviewAgent.py
 ```
 
-O arquivo `testReviewAgent.py` usa os arquivos em `review_agent/test1/` como entrada.
+**Windows:**
 
-### Via API FastAPI
+```powershell
+$env:API_3 = $env:GROQ_API_KEY
+python review_agent\testReviewAgent.py
+```
+
+Usa os arquivos em `review_agent/test1/` como entrada.
+
+### Review agent (API FastAPI)
 
 ```bash
 cd review_agent
-.\.venv\Scripts\python.exe -m uvicorn "review-agent:app" --host 127.0.0.1 --port 8000 --reload
+uvicorn review-agent:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-Acesse `http://127.0.0.1:8000/docs` para a interface Swagger.
+Swagger: `http://127.0.0.1:8000/docs`
 
-### Via PowerShell (Invoke-RestMethod)
+### Test agent (standalone)
 
-```powershell
-$original = Get-Item ".\url.py"
-$migrado  = Get-Item ".\review_agent\test1\migrado.py"
-
-Invoke-RestMethod -Uri "http://localhost:8000/review/files" -Method Post -Form @{
-    original = $original
-    migrado  = $migrado
-}
+```bash
+python test_agent/agent/agent.py \
+  --input-json .pipeline_output/migration_result.json \
+  --output .pipeline_output/test_report.md
 ```
+
+Requer `PROVIDER_API_KEY` e `PROVIDER_BASE_URL` no `.env`.
+
+### Migration agent (standalone)
+
+```bash
+python migration_agent/langgraph-mig03.py
+```
+
+Usa `url.py` como entrada padrão e grava `inferencia.json` na raiz.
 
 ---
 
-## 10. Solução de problemas comuns
+## 10. Solução de problemas
 
-### `ModuleNotFoundError: No module named 'langchain_ollama'`
-
-```bash
-pip install langchain-ollama
-```
-
-### `ModuleNotFoundError: No module named 'langchain_google_genai'`
+### `ModuleNotFoundError`
 
 ```bash
-pip install langchain-google-genai
+pip install -r requirements.txt
+pip install -r review_agent/requirements.txt
 ```
 
-### `ModuleNotFoundError: No module named 'openpyxl'`
-
-```bash
-python -m pip install openpyxl
-```
-
-### `UnicodeEncodeError: 'charmap' codec can't encode character` (Windows)
+### `UnicodeEncodeError` no Windows
 
 ```powershell
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 ```
 
-### `ValueError: GOOGLE_API_KEY não encontrada`
+### `ValueError: API_3 não encontrada`
 
-O review_agent exige `GOOGLE_API_KEY` para os nós pesados (parser, semântico, segurança, crítico). Defina no `.env` ou na sessão:
+Defina `API_3` no `.env` com a mesma chave Groq de `GROQ_API_KEY`:
 
-```powershell
-$env:GOOGLE_API_KEY = "AIza..."
+```env
+API_3=gsk_...
 ```
 
-### `groq.RateLimitError: 429` (por minuto)
+### `RuntimeError: Chaves de API ausentes` (GOOGLE_API_KEY / GROQ_API_KEY)
 
-O `review-agent.py` já tem retry interno com backoff (30s → 60s → 120s). O `test_pipeline.py` tem retry externo adicional (45s → 90s). Se persistir, aguarde 2–3 minutos e tente novamente.
+- Defina todas as variáveis da [seção 5](#5-configurar-chaves-de-api-e-modelos), ou
+- Execute com `--skip-review` se só quiser migration + test
 
-Com Gemini nos nós pesados, esse erro só ocorre nos nós leves (classificador, lint, relatório — consumo muito menor).
+### `groq.RateLimitError: 429`
 
-### `groq.RateLimitError: 429` (diário — TPD)
+- Aguarde 2–3 minutos e tente novamente
+- Use `--skip-review` ou `--skip-test` para reduzir chamadas
+- Instale Ollama para aliviar o migration
+- Limite diário (TPD): aguarde reset às 00:00 UTC
 
-```
-Rate limit reached ... on tokens per day (TPD): Limit 100000, Used 97385
-```
+### Test agent: relatório vazio ou pytest falha
 
-Aguarde o reset às **00:00 UTC** (21:00 horário de Brasília). Use `--skip-review` enquanto aguarda.
-
-### `google.api_core.exceptions.ResourceExhausted` (Gemini)
-
-Limite de TPM do Gemini atingido — improvável no free tier (1M TPM), mas possível em uso intenso. O `_invoke_com_retry` já trata automaticamente.
-
-### `Error code: 413` no test_agent (prompt muito grande)
-
-O `node_analyzer` do test_agent envia ambos os códigos completos para o modelo. Com o modelo 8B (TPM 6.000), o prompt pode exceder o limite. O pipeline já usa automaticamente o 70B para o test_agent.
+- Confirme `pytest`, `pytest-cov` e `responses` instalados
+- Verifique se o código migrado é Python válido (sem marcadores de merge `<<<<<<<`)
+- Confirme `PROVIDER_API_KEY` e `PROVIDER_BASE_URL`
 
 ### `FileNotFoundError: Input file not found`
 
@@ -433,55 +512,62 @@ O `node_analyzer` do test_agent envia ambos os códigos completos para o modelo.
 python test_pipeline.py --input /caminho/para/meu_codigo.py
 ```
 
-### `Dataset not found` no migration_agent
+### Ruff não encontrado pelo review
 
-O arquivo `dataset/Request-Urllib.xlsx` precisa existir. Se não estiver presente, o agente continua sem exemplos few-shot. Verifique se o clone incluiu a pasta `dataset/`.
+O `no_lint` chama `ruff` via subprocess — precisa estar no PATH:
+
+```bash
+pip install ruff
+# Linux/macOS: export PATH="$HOME/.local/bin:$PATH"
+```
+
+### Ollama: connection refused
+
+```bash
+ollama serve
+ollama pull llama3.1
+curl http://localhost:11434/api/tags
+```
 
 ---
 
-## 11. Estrutura completa do repositório
+## 11. Estrutura do repositório
 
 ```
 agente-migracao-TALP/
 │
 ├── migration_agent/
-│   └── langgraph-mig03.py       # Agente de migração urllib → requests
+│   └── langgraph-mig03.py          # Agente de migração urllib → requests
 │
 ├── test_agent/
-│   ├── agent/
-│   │   └── agent.py             # Agente de equivalência funcional
-│   ├── prompts/
+│   ├── agent/agent.py              # Agente de equivalência funcional
+│   ├── prompts/                    # Prompts por nó do grafo
 │   └── requirements.txt
 │
 ├── review_agent/
-│   ├── prompts/
-│   │   ├── parser.json
-│   │   ├── classificador.json
-│   │   ├── agente_semantica.json
-│   │   ├── agente_seguranca.json
-│   │   ├── agente_lint_config.json
-│   │   ├── agente_lint_interpretacao.json
-│   │   ├── no_critico.json
-│   │   └── relatorio_final.json
-│   ├── test1/                   # Exemplos de entrada/saída para testes manuais
-│   ├── .venv/                   # Ambiente virtual (usado por todo o pipeline)
-│   ├── review-agent.py          # Orquestrador LangGraph + API FastAPI
-│   ├── testReviewAgent.py       # Script de teste standalone do review_agent
-│   ├── requirements.txt
-│   └── README.md
+│   ├── prompts/                    # Templates JSON dos nós LangGraph
+│   ├── test1/                      # Exemplos para testReviewAgent.py
+│   ├── review-agent.py             # Orquestrador + API FastAPI
+│   ├── testReviewAgent.py
+│   └── requirements.txt
 │
 ├── dataset/
-│   └── Request-Urllib.xlsx      # Exemplos reais de migração (GitHub)
+│   └── Request-Urllib.xlsx         # Exemplos few-shot (GitHub)
 │
-├── url.py                       # Código urllib de entrada padrão (ConversationScraper)
-├── url-migrate.py               # Código migrado manualmente (referência)
-├── test_pipeline.py             # Script de integração dos três agentes
-├── .env                         # Chaves de API (não commitado — ver .gitignore)
-├── .gitignore
+├── scripts/
+│   ├── run_pipeline_real.py        # Pipeline via módulo agents/ (futuro)
+│   └── run_pipeline_with_feedback.py
 │
-├── PIPELINE.md                  # Documentação do test_pipeline.py
-├── REPLICACAO.md                # Este guia
-└── README.md                    # README geral do projeto
+├── url.py                          # Entrada urllib padrão
+├── url-migrate.py                  # Referência manual (opcional)
+├── inferencia.json                 # Inferência semântica (gerado)
+├── test_pipeline.py                # Pipeline integrado (recomendado)
+├── requirements.txt                # Dependências da raiz
+├── .env                            # Chaves (não commitado)
+├── .pipeline_output/               # Saída do test_pipeline.py
+├── PIPELINE.md                     # Documentação do test_pipeline.py
+├── REPLICACAO.md                   # Este guia
+└── README.md
 ```
 
 ---
@@ -490,7 +576,8 @@ agente-migracao-TALP/
 
 - [LangGraph — Documentação oficial](https://langchain-ai.github.io/langgraph/)
 - [Groq — Console e API Keys](https://console.groq.com/)
+- [Groq — OpenAI-compatible API](https://console.groq.com/docs/openai)
 - [Google AI Studio — API Keys](https://aistudio.google.com/apikey)
+- [Ollama — Download e modelos](https://ollama.com/)
 - [Ruff — Linter Python](https://docs.astral.sh/ruff/)
-- [awesome-reviewers — Skills de revisão](https://github.com/baz-scm/awesome-reviewers)
-- [pr-agent (Qodo) — Referência de prompts](https://github.com/Codium-ai/pr-agent)
+
