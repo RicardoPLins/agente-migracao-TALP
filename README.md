@@ -1,64 +1,179 @@
-# agente-migra-o-TALP
-Um agente que faz migração de código (ex.: urllib -> requests), revisão e testes de equivalência usando agentes separados (migration, review, test).
+# agente-migracao-TALP
 
-# agente-migra-o-TALP
+Pipeline de migração automatizada de código Python (ex.: `urllib` → `requests`) composto por três agentes independentes orquestrados em sequência: **migration**, **test** e **review**.
 
-**Quick start**
+Para replicar o projeto do zero em Linux, macOS ou Windows — incluindo instalação, chaves de API e troubleshooting — consulte **[REPLICACAO.md](REPLICACAO.md)**.
 
-- Abra o repositório e use o virtualenv em `.venv/` ou crie um novo.
+---
 
-**Prerequisites**
+## Visão geral do pipeline
 
-- Python 3.11+ and a virtual environment.
-- Ollama (optional, recommended for local LLMs). Use Homebrew on macOS:
-
-```bash
-brew install ollama
-ollama pull llama3
-ollama serve &
+```
+url.py (código urllib)
+    │
+    ▼
+ migration_agent  →  test_agent  →  review_agent
+    │                      │               │
+    └─ código migrado ─────┴───────────────┘
 ```
 
-**Setup**
+O script `test_pipeline.py` na raiz integra os três agentes e grava os artefatos em `.pipeline_output/`.
+
+---
+
+## Agentes
+
+### migration_agent
+
+**Arquivo:** `migration_agent/langgraph-mig03.py`
+
+Migra código legado (`urllib`) para `requests` usando LangGraph e few-shot learning a partir do dataset `dataset/Request-Urllib.xlsx`.
+
+**Fluxo interno:**
+
+```
+receber → migrar → validar → END
+```
+
+
+| Nó        | Responsabilidade                                                |
+| --------- | --------------------------------------------------------------- |
+| `receber` | Recebe o código original do usuário                             |
+| `migrar`  | LLM infere o comportamento e gera o código migrado              |
+| `validar` | Checa heurísticas básicas (imports, sintaxe, uso de `requests`) |
+
+
+**Saída:** código migrado
+
+**Backend:** Ollama local (se disponível) ou Groq (`llama-3.3-70b-versatile`).
+
+---
+
+### test_agent
+
+**Arquivo:** `test_agent/agent/agent.py`
+
+Gera e executa testes de equivalência funcional entre o código original e o migrado, medindo cobertura e regressões.
+
+**Fluxo interno:**
+
+```
+analyzer → inspector → generator → executor → evaluator → router → report
+```
+
+
+| Nó          | Responsabilidade                                                 |
+| ----------- | ---------------------------------------------------------------- |
+| `analyzer`  | Mapeia funções, endpoints e cenários de teste                    |
+| `inspector` | Inspeciona detalhes de implementação (gzip, erros HTTP, imports) |
+| `generator` | Gera `test_equivalence.py` com pytest                            |
+| `executor`  | Roda pytest + pytest-cov em subprocess                           |
+| `evaluator` | Calcula cobertura (≥ 80%) e equivalência (≥ 90%)                 |
+| `router`    | Decide se a migração precisa de revisão (`NEEDS_REVISION`)       |
+| `report`    | Produz relatório Markdown com veredito                           |
+
+
+**Saída:** relatório de equivalência (`test_report.md`) e métricas JSON.
+
+**Backend:** API compatível com OpenAI via `PROVIDER_API_KEY` + `PROVIDER_BASE_URL` (ex.: Groq OpenAI endpoint).
+
+---
+
+### review_agent
+
+**Arquivo:** `review_agent/review-agent.py`
+
+Revisa a migração comparando original e migrado. Não corrige o código — entrega um relatório com achados priorizados (P0–P3) para humano ou reprocessamento.
+
+**Fluxo interno:**
+
+```
+parser → classificador → roteador ──► semantico  ─┐
+                                      seguranca  ─┤
+                                      lint       ─┘
+                                            │
+                                       critico → relatorio_final → END
+                                            │
+                                      (reflection loop, até 3×)
+```
+
+
+| Nó                | Responsabilidade                                        |
+| ----------------- | ------------------------------------------------------- |
+| `parser`          | `git diff --no-index` + extração estrutural do diff     |
+| `classificador`   | Decide quais especialistas acionar                      |
+| `semantico`       | Equivalência de comportamento, contratos, null-safety   |
+| `seguranca`       | Autenticação, validação de inputs, superfície de ataque |
+| `lint`            | Ruff determinístico + interpretação LLM das regressões  |
+| `critico`         | Meta-revisor; aprova ou sinaliza `deve_reprocessar`     |
+| `relatorio_final` | Consolida achados em Markdown                           |
+
+
+Também expõe API FastAPI em `/review` e `/review/files`. Detalhes em [review_agent/README.md](review_agent/README.md).
+
+**Saída:** `review_report.md` com veredito e lista de achados.
+
+**Backend:** Groq via variável `API_3` (modelo `llama-3.3-70b-versatile`).
+
+---
+
+## Quick start
 
 ```bash
 cd /path/to/agente-migracao-TALP
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate          # Windows: .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+pip install -r review_agent/requirements.txt
 ```
 
-Create a `.env` at the repo root when using external providers (optional for local Ollama):
+Crie `.env` na raiz (detalhes em [REPLICACAO.md](REPLICACAO.md#5-configurar-chaves-de-api-e-modelos)):
 
-```
-GROQ_API_KEY="your-groq-key"
-PROVIDER_BASE_URL="https://your-provider"
-PROVIDER_API_KEY="your-provider-key"
-```
-
-**Run the full pipeline**
-
-```bash
-source .venv/bin/activate
-python scripts/run_pipeline_real.py --examples 3 --timeout 300
+```env
+GROQ_API_KEY=gsk_...
+API_3=gsk_...
+PROVIDER_API_KEY=gsk_...
+PROVIDER_BASE_URL=https://api.groq.com/openai/v1
+GOOGLE_API_KEY=AIza...
 ```
 
-This runs migration → review → test and saves outputs to `.run_output/`.
+Execute o pipeline completo com test_pipeline.py
 
-**Run only the test agent**
+Opções úteis: `--skip-test`, `--skip-review`, `--input meu_codigo.py`, `--examples 5`.
 
-```bash
-source .venv/bin/activate
-python test_agent/agent/agent.py --input-json .run_output/pipeline_output.json --output .run_output/test_report.md
-```
+---
 
-**Troubleshooting**
+## Saídas
 
-- Ollama connection refused: ensure `ollama serve` is running and the requested model is pulled (`ollama pull llama3`).
-- Groq rate limits (429): switch to local Ollama or wait / use another Groq key.
-- Pytest not running / empty test report: install `pytest` and `pytest-cov` (already in `requirements.txt`) and ensure `original_code` and `migrated_code` are valid Python (remove git merge conflict markers like `<<<<<<<`, `=======`, `>>>>>>>` and update Python2 exception syntax `except E, e:` → `except E as e:`).
 
-**Outputs**
+| Arquivo                                  | Descrição                  |
+| ---------------------------------------- | -------------------------- |
+| `.pipeline_output/migrated_code.py`      | Código migrado             |
+| `.pipeline_output/test_report.md`        | Relatório de equivalência  |
+| `.pipeline_output/review_report.md`      | Relatório de revisão       |
+| `.pipeline_output/pipeline_summary.json` | Sumário de todas as etapas |
+|                                          |                            |
 
-- `.run_output/pipeline_output.json` — full pipeline JSON
-- `.run_output/test_report.md` — test report
-- `inferencia.json` — semantic inference (if produced)
+
+---
+
+## Documentação adicional
+
+
+| Arquivo                                          | Conteúdo                                            |
+| ------------------------------------------------ | --------------------------------------------------- |
+| [REPLICACAO.md](REPLICACAO.md)                   | Guia completo de replicação (Linux, macOS, Windows) |
+| [PIPELINE.md](PIPELINE.md)                       | Detalhes do `test_pipeline.py`                      |
+| [review_agent/README.md](review_agent/README.md) | API e arquitetura do review                         |
+| [test_agent/README.md](test_agent/README.md)     | Thresholds e uso do test agent                      |
+
+
+---
+
+## Troubleshooting
+
+- **Ollama connection refused:** execute `ollama serve` e `ollama pull llama3.1`.
+- **Groq rate limits (429):** use Ollama no migration, aguarde o reset ou use `--skip-review`.
+- **Relatório de teste vazio:** confirme `pytest`, `pytest-cov` e código Python válido (sem marcadores de merge `<<<<<<<`).
+- **Setup completo:** veja [REPLICACAO.md](REPLICACAO.md#10-solução-de-problemas).
+

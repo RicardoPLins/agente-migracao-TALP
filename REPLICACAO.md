@@ -156,7 +156,7 @@ O pipeline usa **três backends de LLM** distintos. Crie um arquivo `.env` na **
 ```env
 # ── Groq (migration fallback + review_agent) ──────────────────────────────
 GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
-API_3=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxx          # mesma chave — review_agent lê API_3
+API_3=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxx          # outra chave groq — review_agent lê API_3
 
 # ── Test agent (API compatível com OpenAI) ────────────────────────────────
 PROVIDER_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
@@ -168,7 +168,7 @@ GOOGLE_API_KEY=AIzaxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 > **Importante:** o `review_agent/review-agent.py` na `main` usa **apenas Groq** via variável `API_3` (modelo `llama-3.3-70b-versatile`). O `test_pipeline.py` ainda valida `GOOGLE_API_KEY` antes de chamar o review — defina-a mesmo que o review atual não use Gemini, ou use `--skip-review`.
 
-### Tabela de variáveis
+### Tabela de variáveis que tem que ter no .env
 
 
 | Variável            | Agente                    | Obrigatória                           | Descrição                                                |
@@ -264,7 +264,7 @@ $env:GOOGLE_API_KEY     = "AIza..."
 
 ## 6. Ollama (opcional, recomendado)
 
-O Ollama reduz custo e rate limits no **migration_agent**. O **test_agent** usa `PROVIDER_`* independentemente; o **review_agent** na `main` usa Groq via `API_3`.
+O Ollama reduz custo e rate limits no **migration_agent**. O **test_agent** usa `PROVIDER`_* independentemente; o **review_agent** na `main` usa Groq via `API_3`.
 
 ### Linux
 
