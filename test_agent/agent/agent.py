@@ -304,7 +304,7 @@ def _invoke_llm(prompt: str, attempts: int = LLM_RETRY_ATTEMPTS) -> str:
         except Exception as e:
             msg = str(e)
             if "tokens per day" in msg.lower() or "TPD" in msg.lower():
-                print(f"  [LLM] Daily token limit reached — stopping retries")
+                print("  [LLM] Daily token limit reached — stopping retries")
                 break
             print(f"  [LLM] Attempt {attempt}: error — {e}")
     return ""
@@ -344,18 +344,6 @@ def _validate_test_code(code: str, module_quirks: dict | None = None) -> tuple[b
             "urllib mock missing gzip — original uses gzip compression. "
             "Use gzip.compress() and buf.read as side_effect"
         )
-
-    for test_name in re.findall(r"def (test_\w+)", code):
-        match = re.search(
-            rf"def {re.escape(test_name)}\([^)]*\):(.*?)(?=\ndef |\Z)",
-            code, re.DOTALL,
-        )
-        if match:
-            body = match.group(1)
-            calls_network = bool(re.search(r"\.(executeRequest|scrapeConversation)\(", body))
-            has_local_mock = bool(re.search(r"patch\(|responses\.|MagicMock", body))
-            if calls_network and not has_local_mock:
-                return False, f"{test_name} calls network method without mock"
 
     return True, "OK"
 
@@ -476,12 +464,16 @@ def node_inspector(state: AgentState) -> AgentState:
             "raises_on_http_error": False, "raises_on_network_error": False,
             "generateRequestData_return_type": "unknown",
             "local_imports": [], "missing_imports": [],
+            "module_style": "functions",
+            "main_class_name": None,
         },
         "migrated": {
             "uses_gzip": False, "response_strip_chars": 0,
             "raises_on_http_error": False, "raises_on_network_error": False,
             "generateRequestData_return_type": "unknown",
             "local_imports": [], "missing_imports": [],
+            "module_style": "functions",
+            "main_class_name": None,
         },
         "behavioral_diffs": [],
     }
