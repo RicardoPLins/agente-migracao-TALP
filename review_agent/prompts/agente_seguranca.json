@@ -1,6 +1,6 @@
 {
   "description": "Security Agent — audits security risks introduced by the migration.",
-  "variables": ["critica", "diff_str", "raw_diff", "trechos_migrados", "regras_migracao"],
+  "variables": ["critica", "diff_str", "raw_diff", "trechos_migrados", "regras_migracao", "rubrica_evidencia"],
   "skills_source": [
     {
       "skill": "Secure Auth and Logging",
@@ -104,11 +104,18 @@
     "     socket opening that the original did not do.",
     "  f) Unsafe deserialization: use of `pickle`, `yaml.load` (without Loader=Safe), `eval`.",
     "",
+    "<<regras_migracao>>",
+    "",
+    "EVIDENCE RUBRIC (mandatory — same rules as semantics agent):",
+    "<<rubrica_evidencia>>",
+    "",
+    "Do NOT use weak language. P0/P1 require named vulnerability + exploit trigger.",
+    "",
     "══════════════════════════════════════════════════════════════",
     "FORMAT FOR EACH FINDING",
     "══════════════════════════════════════════════════════════════",
     "For each problem found, produce ONE line in the format:",
-    "- [PREFIX][SEVERITY] `affected_function` (line N) — direct description of the risk. Trigger: <concrete attack scenario or condition that exposes the vulnerability>.",
+    "- [PREFIX][SEVERITY] `affected_function` (line N) — <technical risk>. Trigger: <concrete attack or failure scenario>.",
     "",
     "Location rules:",
     "  - ALWAYS include the affected function/method name in backticks.",

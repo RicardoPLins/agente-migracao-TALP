@@ -54,12 +54,20 @@ def _load_regras_migracao() -> str:
     return ""
 
 
+def _load_rubrica_evidencia() -> str:
+    path = _PROMPTS_DIR / "rubrica_evidencia.txt"
+    if path.exists():
+        return path.read_text(encoding="utf-8").strip()
+    return ""
+
+
 def _render(key: str, **kwargs: str) -> str:
     """
     Renderiza um template de prompt substituindo os placeholders <<variavel>>
     pelos valores fornecidos.
     """
     kwargs.setdefault("regras_migracao", _REGRAS_MIGRACAO)
+    kwargs.setdefault("rubrica_evidencia", _RUBRICA_EVIDENCIA)
     text = "\n".join(_PROMPTS[key])
     for var, val in kwargs.items():
         text = text.replace(f"<<{var}>>", val)
@@ -68,6 +76,7 @@ def _render(key: str, **kwargs: str) -> str:
 
 _load_prompts()
 _REGRAS_MIGRACAO = _load_regras_migracao()
+_RUBRICA_EVIDENCIA = _load_rubrica_evidencia()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -344,6 +353,154 @@ def _extrair_trechos_funcoes(codigo_migrado: str, diff_estruturado: dict) -> str
             + "\n".join(numeradas)
         )
     return "\n\n".join(trechos)
+
+
+def _bloco_funcao(codigo_migrado: str, nome: str) -> str:
+    info = _extrair_bloco_def(codigo_migrado.splitlines(), nome)
+    if not info:
+        return ""
+    _, bloco = info
+    return "\n".join(bloco)
+
+
+def _downgrade_severidade(sev: str, steps: int = 1) -> str:
+    order = ["P0", "P1", "P2", "P3"]
+    idx = order.index(sev) if sev in order else 3
+    return order[min(idx + steps, 3)]
+
+
+def _tem_evidencia_forte(texto: str) -> bool:
+    return bool(_EVIDENCIA_FORTE_RE.search(texto))
+
+
+def _checar_contrato_http(bloco: str) -> dict[str, str] | None:
+    """Regras determinísticas de Content-Type / payload (eleva severidade com evidência)."""
+    bloco_lower = bloco.lower()
+    usa_json_dumps = "json.dumps" in bloco
+    ct_form = (
+        "application/x-www-form-urlencoded" in bloco_lower
+        or "urlencode" in bloco_lower
+    )
+    ct_json = "application/json" in bloco_lower
+    data_form = re.search(r"data\s*=\s*[a-zA-Z_]\w*(?!.*json\.dumps)", bloco)
+
+    if ct_form and usa_json_dumps and not ct_json:
+        return {
+            "prefixo": "CONTRACT",
+            "severidade": "P0",
+            "descricao": (
+                "JSON body (json.dumps) enviado com semântica form-urlencoded/urlencode — "
+                "servidor interpreta corpo incorretamente"
+            ),
+            "trigger": "POST/PUT com payload JSON e header/body no formato form",
+        }
+    if ct_json and data_form and not usa_json_dumps:
+        return {
+            "prefixo": "CONTRACT",
+            "severidade": "P1",
+            "descricao": (
+                "Content-Type application/json mas corpo enviado como form dict/urlencode "
+                "sem json.dumps"
+            ),
+            "trigger": "request com Content-Type JSON e data= dict/urlencoded",
+        }
+    return None
+
+
+def _validar_e_reclassificar_achado(
+    achado: dict[str, Any],
+    codigo_migrado: str,
+) -> dict[str, Any] | None:
+    """
+    Filtra achados genéricos/fracos e aplica regras contextuais determinísticas.
+    Retorna None para descartar o achado.
+    """
+    prefixo = achado.get("prefixo") or ""
+    sev = achado.get("severidade") or "P3"
+    desc = achado.get("descricao") or ""
+    trigger = achado.get("trigger") or ""
+    texto = f"{desc}. {trigger}"
+
+    if prefixo == "INFO" and "no relevant" in texto.lower():
+        return None
+
+    if not achado.get("prefixo") and not _tem_evidencia_forte(texto):
+        return None
+
+    # Elevação contextual por corpo da função
+    simbolo = achado.get("simbolo")
+    if simbolo:
+        bloco = _bloco_funcao(codigo_migrado, simbolo)
+        if bloco:
+            contrato = _checar_contrato_http(bloco)
+            if contrato:
+                achado["prefixo"] = contrato["prefixo"]
+                achado["severidade"] = contrato["severidade"]
+                achado["descricao"] = contrato["descricao"]
+                achado["trigger"] = contrato["trigger"]
+                sev = achado["severidade"]
+                desc = achado["descricao"]
+                trigger = achado["trigger"]
+                texto = f"{desc}. {trigger}"
+
+    # Observabilidade → no máximo P3
+    if _OBSERVABILIDADE_RE.search(texto) and sev in ("P0", "P1"):
+        achado["severidade"] = "P3"
+        achado["prefixo"] = "INFO"
+        return achado
+
+    # Troca genérica urllib→requests sem evidência forte
+    if _GENERICO_SWAP_RE.search(texto) and not _tem_evidencia_forte(texto):
+        return None
+
+    # Linguagem fraca em P0/P1 sem evidência concreta → descartar
+    if sev in ("P0", "P1") and _LINGUAGEM_FRACA_RE.search(texto):
+        if not _tem_evidencia_forte(texto):
+            return None
+        achado["severidade"] = _downgrade_severidade(sev, 1)
+        return achado
+
+    # P0 exige evidência forte
+    if sev == "P0" and not _tem_evidencia_forte(texto):
+        achado["severidade"] = "P1"
+
+    # Trigger vago em P1 → rebaixa
+    if sev == "P1" and len(trigger.split()) < 4 and not _tem_evidencia_forte(texto):
+        achado["severidade"] = "P2"
+
+    # "error handling changed" sem exceção nomeada → P2 no máximo
+    if re.search(r"error handling .+ changed", texto, re.I) and not re.search(
+        r"\b(KeyError|TypeError|HTTPError|URLError|JSONDecodeError)\b", texto, re.I
+    ):
+        if achado["severidade"] in ("P0", "P1"):
+            achado["severidade"] = "P2"
+
+    return achado
+
+
+def _pipeline_achados(
+    achados: list[str],
+    agente: str,
+    codigo_migrado: str,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Parse único + validação contextual + correção de linhas."""
+    indice = _indice_simbolos_migrado(codigo_migrado)
+    formatados: list[str] = []
+    estruturados: list[dict[str, Any]] = []
+    for raw in achados:
+        raw = raw.strip()
+        if not raw.startswith("- ["):
+            continue
+        parsed = _corrigir_linha_achado(_parse_achado(raw, agente), indice)
+        if not parsed.get("prefixo"):
+            continue
+        validado = _validar_e_reclassificar_achado(parsed, codigo_migrado)
+        if validado is None:
+            continue
+        validado["formatado"] = _formatar_achado(validado)
+        estruturados.append(validado)
+        formatados.append(validado["formatado"])
+    return formatados, estruturados
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -648,18 +805,49 @@ def _rota_pos_critico(
 ACHADO_RE = re.compile(
     r"^-\s*\[(?P<prefix>[^\]]+)\]\[(?P<sev>P[0-3])\]\s*"
     r"(?:`(?P<symbol>[^`]+)`\s*)?"
-    r"(?:\((?:line|linha)\s+(?P<line_paren>\d+)\)|(?:\b(?:line|linha)\s+(?P<line_plain>\d+)))?"
+    r"(?:\((?:line|linha)\s+(?P<line_paren>\d+)(?:\s+of\s+migrated)?\)"
+    r"|(?:\b(?:line|linha)\s+(?P<line_plain>\d+)))?"
+    r"(?:\s*_\([^)]*modelo citou linha \d+\)_)?"
     r"\s*[—–-]\s*(?P<body>.+)$",
     re.IGNORECASE,
+)
+
+_LINGUAGEM_FRACA_RE = re.compile(
+    r"\b(may not work|might not|could lead to|potentially|possibly|"
+    r"may impact|can cause unexpected|potentially leading|"
+    r"differences in behavior|without proper handling|as expected|"
+    r"may cause|could cause)\b",
+    re.I,
+)
+
+_EVIDENCIA_FORTE_RE = re.compile(
+    r"\b(KeyError|TypeError|AttributeError|ValueError|JSONDecodeError|"
+    r"HTTPError|ConnectionError|ChunkedEncodingError|UnicodeDecodeError)\b|"
+    r"Content-Type|application/x-www-form-urlencoded|application/json|"
+    r"urlencode|json\.dumps|returns .+ instead of|status_code|\.json\(\)|"
+    r"\.text\b|\.content\b|gzip|GzipFile|double decompression",
+    re.I,
+)
+
+_GENERICO_SWAP_RE = re.compile(
+    r"\b(changed from urllib|urllib\.request to requests|"
+    r"requests instead of urllib|library (?:was )?changed|"
+    r"logging .+ changed|initialization .+ changed)\b",
+    re.I,
+)
+
+_OBSERVABILIDADE_RE = re.compile(
+    r"\b(logging|log message|comment|naming|cosmetic|observability)\b",
+    re.I,
 )
 
 _LEGENDA_SEVERIDADE = """\
 | Nível | Etiqueta | Significado | Ação recomendada |
 |-------|----------|-------------|------------------|
-| **P0** | Crítico | Quebra funcional garantida em runtime (crash, perda de dados) | Corrigir **antes** do merge |
-| **P1** | Alto | Mudança silenciosa de comportamento em produção | Corrigir **antes** do merge |
-| **P2** | Médio | Qualidade, manutenibilidade ou robustez | Corrigir se possível |
-| **P3** | Baixo | Sugestão ou cosmético | Opcional |
+| **P0** | Quebra garantida | Crash, formato HTTP errado, perda/corrupção de dados | Corrigir **antes** do merge |
+| **P1** | Quebra provável | Mudança silenciosa de retorno/contrato com evidência no diff | Corrigir **antes** do merge |
+| **P2** | Robustez | Tratamento de erro, timeout, retry degradado (novo no diff) | Corrigir se possível |
+| **P3** | Style / observabilidade | Logging, naming, sugestões sem impacto funcional | Opcional |
 """
 
 
@@ -699,9 +887,9 @@ def _parse_achado(raw: str, agente: str) -> dict[str, Any]:
     body = m.group("body").strip()
     trigger = ""
     if re.search(r"\bTrigger\s*:", body, re.IGNORECASE):
-        partes = re.split(r"\.\s*Trigger\s*:", body, maxsplit=1, flags=re.IGNORECASE)
+        partes = re.split(r"\s+Trigger\s*:", body, maxsplit=1, flags=re.IGNORECASE)
         if len(partes) == 2:
-            body, trigger = partes[0].strip(), partes[1].strip()
+            body, trigger = partes[0].strip().rstrip("."), partes[1].strip()
 
     linha_llm = m.group("line_paren") or m.group("line_plain")
     return {
@@ -757,21 +945,14 @@ def _formatar_achado(achado: dict[str, Any]) -> str:
 def _normalizar_achados(
     achados: list[str], agente: str, codigo_migrado: str
 ) -> tuple[list[str], list[dict[str, Any]]]:
-    indice = _indice_simbolos_migrado(codigo_migrado)
-    formatados: list[str] = []
-    estruturados: list[dict[str, Any]] = []
-    for raw in achados:
-        parsed = _corrigir_linha_achado(_parse_achado(raw, agente), indice)
-        estruturados.append(parsed)
-        formatados.append(parsed["formatado"])
-    return formatados, estruturados
+    return _pipeline_achados(achados, agente, codigo_migrado)
 
 
 def _contar_severidades(achados: list[dict[str, Any]]) -> Counter[str]:
     counts: Counter[str] = Counter()
     for a in achados:
-        if a.get("raw", "").startswith("- ["):
-            counts[a.get("severidade", "P3")] += 1
+        if a.get("prefixo") and a.get("severidade"):
+            counts[a["severidade"]] += 1
     return counts
 
 
@@ -788,7 +969,7 @@ def _veredito(deve_reprocessar: bool, counts: Counter[str]) -> str:
 def _secao_por_severidade(
     titulo: str, emoji: str, sev: str, achados: list[dict[str, Any]]
 ) -> str:
-    itens = [a for a in achados if a.get("severidade") == sev and a.get("raw", "").startswith("- [")]
+    itens = [a for a in achados if a.get("severidade") == sev and a.get("prefixo")]
     linhas = [a["formatado"] for a in itens]
     corpo = "\n".join(linhas) if linhas else "_(nenhum achado)_"
     return f"### {emoji} {titulo} ({sev})\n\n{corpo}\n"
@@ -819,20 +1000,18 @@ def _gerar_resumo_executivo_llm(
         return f"Veredito: {veredito}"
 
 
-def _gerar_relatorio_markdown(state: CodeReviewState, resumo_executivo: str) -> str:
+def _gerar_relatorio_markdown(
+    state: CodeReviewState,
+    resumo_executivo: str,
+    todos_est: list[dict[str, Any]],
+    sem_fmt: list[str],
+    seg_fmt: list[str],
+    lint_fmt: list[str],
+) -> str:
     codigo_migrado = state["codigo_migrado"]
     deve_reprocessar = bool(state.get("deve_reprocessar"))
 
-    sem_fmt, sem_est = _normalizar_achados(
-        state.get("achados_semantica", []), "semantica", codigo_migrado
-    )
-    seg_fmt, seg_est = _normalizar_achados(
-        state.get("achados_seguranca", []), "seguranca", codigo_migrado
-    )
-    lint_fmt, lint_est = _normalizar_achados(
-        state.get("achados_lint", []), "lint", codigo_migrado
-    )
-    todos = sem_est + seg_est + lint_est
+    todos = todos_est
     counts = _contar_severidades(todos)
     veredito = _veredito(deve_reprocessar, counts)
     iteracoes = state.get("iteracao", 0)
@@ -920,9 +1099,21 @@ def _achados_estruturados(state: CodeReviewState) -> list[dict[str, Any]]:
         ("seguranca", "achados_seguranca"),
         ("lint", "achados_lint"),
     ):
-        _, est = _normalizar_achados(state.get(chave, []), agente, codigo)
+        _, est = _pipeline_achados(state.get(chave, []), agente, codigo)
         resultado.extend(est)
     return resultado
+
+
+def _consolidar_achados(state: CodeReviewState) -> tuple[
+    list[str], list[str], list[str], list[dict[str, Any]]
+]:
+    """Pipeline único de achados — evita re-parse no relatório."""
+    codigo = state["codigo_migrado"]
+    sem_fmt, sem_est = _pipeline_achados(state.get("achados_semantica", []), "semantica", codigo)
+    seg_fmt, seg_est = _pipeline_achados(state.get("achados_seguranca", []), "seguranca", codigo)
+    lint_fmt, lint_est = _pipeline_achados(state.get("achados_lint", []), "lint", codigo)
+    todos = sem_est + seg_est + lint_est
+    return sem_fmt, seg_fmt, lint_fmt, todos
 
 
 def no_relatorio_final(state: CodeReviewState) -> dict:
@@ -932,31 +1123,21 @@ def no_relatorio_final(state: CodeReviewState) -> dict:
     via índice de símbolos do código migrado.
     """
     llm = _get_llm()
-    codigo_migrado = state["codigo_migrado"]
-
-    sem_fmt, _ = _normalizar_achados(state.get("achados_semantica", []), "semantica", codigo_migrado)
-    seg_fmt, _ = _normalizar_achados(state.get("achados_seguranca", []), "seguranca", codigo_migrado)
-    lint_fmt, _ = _normalizar_achados(state.get("achados_lint", []), "lint", codigo_migrado)
-
-    state_norm: CodeReviewState = {
-        **state,
-        "achados_semantica": sem_fmt,
-        "achados_seguranca": seg_fmt,
-        "achados_lint": lint_fmt,
-    }
+    sem_fmt, seg_fmt, lint_fmt, todos = _consolidar_achados(state)
 
     achados_resumo = "\n".join([
         "### Semântica:", *(sem_fmt or ["(nenhum)"]), "",
         "### Segurança:", *(seg_fmt or ["(nenhum)"]), "",
         "### Lint:", *(lint_fmt or ["(nenhum)"]),
     ])
-    todos = _achados_estruturados(state_norm)
     veredito = _veredito(bool(state.get("deve_reprocessar")), _contar_severidades(todos))
 
     resumo = _gerar_resumo_executivo_llm(
         llm, achados_resumo, bool(state.get("deve_reprocessar")), veredito
     )
-    relatorio = _gerar_relatorio_markdown(state_norm, resumo)
+    relatorio = _gerar_relatorio_markdown(
+        state, resumo, todos, sem_fmt, seg_fmt, lint_fmt
+    )
 
     return {
         "relatorio_final": relatorio,

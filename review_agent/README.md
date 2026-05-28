@@ -38,16 +38,16 @@ Entrada (original + migrado)
 ### Nós e responsabilidades
 
 
-| Nó                 | Função                                                          | LLM        |
-| ------------------ | --------------------------------------------------------------- | ---------- |
-| `no_parser`        | `git diff --no-index` + diff estruturado (funções/classes/deps) | Sim (Groq) |
-| `no_classificador` | Roteia para especialistas com base no diff                      | Sim        |
-| `no_roteador`      | Despacha via `Send()`; reseta achados a cada iteração           | —          |
-| `no_semantico`     | Equivalência de comportamento, contratos, null-safety           | Sim        |
-| `no_seguranca`     | Autenticação, validação de inputs, superfície de ataque         | Sim        |
-| `no_lint`          | Ruff via `subprocess`; LLM interpreta regressões novas          | Sim        |
-| `no_critico`       | Meta-avaliador; aprova ou pede refinamento                      | Sim        |
-| `relatorio_final`  | Template Markdown determinístico (seções 2–6) + resumo executivo LLM | Parcial |
+| Nó                 | Função                                                               | LLM        |
+| ------------------ | -------------------------------------------------------------------- | ---------- |
+| `no_parser`        | `git diff --no-index` + diff estruturado (funções/classes/deps)      | Sim (Groq) |
+| `no_classificador` | Roteia para especialistas com base no diff                           | Sim        |
+| `no_roteador`      | Despacha via `Send()`; reseta achados a cada iteração                | —          |
+| `no_semantico`     | Equivalência de comportamento, contratos, null-safety                | Sim        |
+| `no_seguranca`     | Autenticação, validação de inputs, superfície de ataque              | Sim        |
+| `no_lint`          | Ruff via `subprocess`; LLM interpreta regressões novas               | Sim        |
+| `no_critico`       | Meta-avaliador; aprova ou pede refinamento                           | Sim        |
+| `relatorio_final`  | Template Markdown determinístico (seções 2–6) + resumo executivo LLM | Parcial    |
 
 
 Todos os nós com LLM usam a mesma instância:
@@ -106,7 +106,7 @@ API_3=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | `LANGSMITH_PROJECT` | Nome do projeto no LangSmith                      | Não         |
 
 
-> **Integração com `test_pipeline.py`:** o pipeline carrega `review_agent/review-agent.py` via `REVIEW_AGENT_DIR` e exige `API_3` antes de executar o review. Para o pipeline completo, configure também `GROQ_API_KEY` (migration) e `PROVIDER_*` (test). Ver [REPLICACAO.md](../REPLICACAO.md).
+> **Integração com `test_pipeline.py`:** o pipeline carrega `review_agent/review-agent.py` via `REVIEW_AGENT_DIR` e exige `API_3` antes de executar o review. Para o pipeline completo, configure também `GROQ_API_KEY` (migration) e `PROVIDER_`* (test). Ver [REPLICACAO.md](../REPLICACAO.md).
 
 ---
 
@@ -151,31 +151,10 @@ Swagger: `http://127.0.0.1:8000/docs`
 
 Envie `codigo_original` e `codigo_migrado` via `multipart/form-data`.
 
-### Uso programático (sem FastAPI)
-
-```python
-import importlib.util
-from pathlib import Path
-from dotenv import load_dotenv
-
-load_dotenv()
-
-REVIEW_AGENT_DIR = Path("review_agent")
-spec = importlib.util.spec_from_file_location(
-    "review_agent", REVIEW_AGENT_DIR / "review-agent.py"
-)
-ra = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(ra)
-
-result = ra._executar_grafo(original_code, migrated_code)
-print(result["relatorio_final"])
-```
-
 ### Via pipeline integrado
 
 ```bash
 python test_pipeline.py              # review_agent/review-agent.py via import dinâmico
-python test_pipeline.py --skip-review
 ```
 
 ---
@@ -183,18 +162,19 @@ python test_pipeline.py --skip-review
 ## Resposta (`_executar_grafo` / API)
 
 
-| Campo               | Tipo     | Descrição                                        |
-| ------------------- | -------- | ------------------------------------------------ |
-| `raw_diff`          | string   | Diff unificado do `git diff --no-index`          |
-| `diff`              | object   | Diff estruturado (funções/classes alteradas)     |
-| `agentes_acionados` | string[] | `"semantica"`, `"seguranca"`, `"lint"`           |
-| `achados_semantica` | string[] | Achados com severidade [P0]–[P3]                 |
-| `achados_seguranca` | string[] | Riscos de segurança [P0]–[P3]                    |
-| `achados_lint`      | string[] | Regressões de lint/style                         |
+| Campo                  | Tipo     | Descrição                                                |
+| ---------------------- | -------- | -------------------------------------------------------- |
+| `raw_diff`             | string   | Diff unificado do `git diff --no-index`                  |
+| `diff`                 | object   | Diff estruturado (funções/classes alteradas)             |
+| `agentes_acionados`    | string[] | `"semantica"`, `"seguranca"`, `"lint"`                   |
+| `achados_semantica`    | string[] | Achados com severidade [P0]–[P3]                         |
+| `achados_seguranca`    | string[] | Riscos de segurança [P0]–[P3]                            |
+| `achados_lint`         | string[] | Regressões de lint/style                                 |
 | `achados_estruturados` | object[] | Achados parseados (severidade, símbolo, linha corrigida) |
-| `iteracoes`         | int      | Rodadas do reflection loop (máx. 3)              |
-| `deve_reprocessar`  | bool     | `true` → migration_agent deve refazer a migração |
-| `relatorio_final`   | string   | Relatório Markdown consolidado                   |
+| `iteracoes`            | int      | Rodadas do reflection loop (máx. 3)                      |
+| `deve_reprocessar`     | bool     | `true` → migration_agent deve refazer a migração         |
+| `relatorio_final`      | string   | Relatório Markdown consolidado                           |
+
 
 ### Template do `review_report.md`
 
@@ -212,15 +192,14 @@ O nó `relatorio_final` **não** delega o relatório inteiro ao LLM. A estrutura
 
 A LLM frequentemente erra números de linha (especialmente ao copiar do hunk do diff). O pipeline:
 
-1. Faz parse de cada achado (`[PREFIX][Px] \`funcao\` (line N) — …`)
+1. Faz parse de cada achado (`[PREFIX][Px] \`funcao (line N) — …`)
 2. Indexa `def nome()` no código migrado
 3. Quando o símbolo existe, **substitui** a linha pela definição real
-4. Anota _(modelo citou linha N)_ quando houve divergência
+4. Anota *(modelo citou linha N)* quando houve divergência
 
 Os achados corrigidos aparecem em `achados_semantica` / `achados_seguranca` / `achados_lint` (strings) e em `achados_estruturados` (JSON com `linha`, `linha_llm`, `linha_corrigida`).
 
 Semântica e segurança recebem **trechos numerados** só das funções em `altered_functions` / `added_functions` (`<<trechos_migrados>>`), não o arquivo migrado inteiro — economia de tokens mantendo contexto local. O lint continua com `codigo_migrado` completo (Ruff + anti-patterns).
-
 
 ---
 
@@ -264,32 +243,19 @@ review_agent/
 | `[COSMÉTICO]`, `[NAMING]`                | P3    | Sugestão; não bloqueia                 |
 
 
-### Contrato de migração (`regras_migracao.txt`)
-
-Texto fixo com as 9 regras urllib→requests (espelhando o contrato do `migration_agent`, **sem importar código dele**). Injetado automaticamente em `_render()` via placeholder `<<regras_migracao>>` nos prompts:
-
-| Prompt | Uso |
-|---|---|
-| `agente_semantica.json` | Checklist de equivalência funcional |
-| `agente_seguranca.json` | Regras 6, 8 e 9 (POST, Request, Session) |
-| `agente_lint_interpretacao.json` | Cruzamento antes dos anti-patterns |
-| `no_critico.json` | Validar achados P0/P1 contra o contrato |
-
-Para alterar as regras, edite apenas `prompts/regras_migracao.txt`.
-
 ### Placeholders por nó
 
 
-| Arquivo                          | Placeholders                                                                               |
-| -------------------------------- | ------------------------------------------------------------------------------------------ |
-| `parser.json`                    | `<<codigo_original>>`, `<<codigo_migrado>>`, `<<raw_diff>>`                                |
-| `classificador.json`             | `<<diff_str>>`                                                                             |
-| `agente_semantica.json`          | `<<critica>>`, `<<diff_str>>`, `<<raw_diff>>`, `<<trechos_migrados>>`, `<<regras_migracao>>` |
-| `agente_seguranca.json`          | idem semântica |
-| `agente_lint_config.json`        | `<<codigo_original>>` |
+| Arquivo                          | Placeholders                                                                                          |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `parser.json`                    | `<<codigo_original>>`, `<<codigo_migrado>>`, `<<raw_diff>>`                                           |
+| `classificador.json`             | `<<diff_str>>`                                                                                        |
+| `agente_semantica.json`          | `<<critica>>`, `<<diff_str>>`, `<<raw_diff>>`, `<<trechos_migrados>>`, `<<regras_migracao>>`          |
+| `agente_seguranca.json`          | idem semântica                                                                                        |
+| `agente_lint_config.json`        | `<<codigo_original>>`                                                                                 |
 | `agente_lint_interpretacao.json` | `<<critica>>`, `<<novos_issues>>`, `<<estilo_inferido>>`, `<<codigo_migrado>>`, `<<regras_migracao>>` |
-| `no_critico.json`                | `<<iteracao>>`, `<<achados_str>>`, `<<regras_migracao>>` |
-| `relatorio_final.json`           | `<<achados_resumo>>`, `<<deve_reprocessar>>` (apenas resumo executivo) |
+| `no_critico.json`                | `<<iteracao>>`, `<<achados_str>>`, `<<regras_migracao>>`                                              |
+| `relatorio_final.json`           | `<<achados_resumo>>`, `<<deve_reprocessar>>` (apenas resumo executivo)                                |
 
 
 `<<critica>>` é preenchido pelo `no_critico` nas iterações de refinamento; na primeira rodada fica vazio.
