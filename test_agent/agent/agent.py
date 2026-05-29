@@ -42,246 +42,446 @@ llm = ChatOpenAI(
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
 PROMPT_ANALYZER = """
-You are an analyzer. Receive two Python modules: ORIGINAL (urllib) and MIGRATED (requests).
+You are a test planning analyst for Python migration projects.
 
-Produce a concise JSON test plan with:
-- original_functions: list of {name, params, endpoints, returns, error_handling}
-- migrated_functions: same structure
-- equivalence_pairs: list of {original, migrated, behavioral_diff}
-- test_scenarios: max 12 items, each with {id, category, function, description, mock_setup, expected_original, expected_migrated, priority}
-- coverage_notes: one sentence
+Your task: analyze a urllib-based module (ORIGINAL) and its requests-based rewrite (MIGRATED),
+then produce a structured test plan to verify behavioral equivalence.
 
-Categories: happy_path | http_error | network_error | invalid_input | headers | response_parsing
+## Output
+Return ONLY valid JSON matching the schema below.
+No markdown fences, no explanation, no comments.
 
-Return ONLY valid JSON, no markdown, no explanation.
+## Schema
+{
+  "original_functions": [
+    {
+      "name": str,
+      "params": [str],
+      "returns": str,          // "bytes" | "dict" | "str" | "None" | other
+      "raises": [str]          // e.g. ["urllib.error.URLError", "urllib.error.HTTPError"]
+    }
+  ],
+  "migrated_functions": [
+    {
+      "name": str,
+      "params": [str],
+      "returns": str,          // "bytes" | "dict" | "str" | "None" | other
+      "raises": [str]          // e.g. ["requests.exceptions.ConnectionError", "requests.exceptions.HTTPError"]
+    }
+  ],
+  "equivalence_pairs": [
+    {
+      "original": str,         // function name or "NONE"
+      "migrated": str,         // function name or "NONE"
+      "mapping": str,          // "direct" | "split" | "merged" | "removed" | "added"
+      "behavioral_diff": str   // "none" | "gzip_handling" | "raise_for_status" | "return_type" | "encoding" | "multiple"
+    }
+  ],
+  "test_scenarios": [
+    {
+      "id": str,               // "TC001", "TC002", ...
+      "category": str,         // see Category Rules
+      "function_pair": str,    // must match a value in equivalence_pairs[].original
+      "description": str,      // one sentence: what behavioral property this test verifies
+      "inputs": {},            // concrete argument values, e.g. {"user_id": 42} — NOT mock code
+      "expected_behavior": str // "same" | "original_raises_url_error" | "original_raises_http_error" | "migrated_raises_http_error" | "different_return_type"
+      "priority": str          // "high" | "medium" | "low"
+    }
+  ],
+  "coverage_notes": str        // one sentence
+}
 
-ORIGINAL:
+## Category Rules
+Allowed: "happy_path" | "http_error" | "network_error" | "invalid_input" | "headers" | "response_parsing"
+Minimum required:
+  - happy_path: 2
+  - http_error: 2
+  - network_error: 1
+  - invalid_input: 1
+Maximum total: 12
+
+## Migration Context
+ORIGINAL uses urllib. Keep in mind:
+  - Network errors raise urllib.error.URLError
+  - HTTP errors raise urllib.error.HTTPError
+  - Responses must be manually decoded (read() + decode())
+  - Gzip must be decompressed manually via gzip.GzipFile
+
+MIGRATED uses requests. Keep in mind:
+  - Network errors raise requests.exceptions.ConnectionError
+  - HTTP errors only raise if raise_for_status() is explicitly called
+  - Response body is accessed via .text or .json()
+  - Gzip is decompressed automatically
+
+## Constraints
+  - "inputs" must contain concrete values — never mock setup or code
+  - "function_pair" must reference a value that exists in equivalence_pairs[].original
+  - If a function has no counterpart, use "NONE" in that field
+  - If you cannot determine a value with certainty, use null — do not guess
+  - Do not invent function names that do not exist in the source code
+
+ORIGINAL MODULE (urllib):
 {original_code}
 
-MIGRATED:
+MIGRATED MODULE (requests):
 {migrated_code}
 """.strip()
 
+
 PROMPT_INSPECTOR = """
-You are a code inspector. Analyze the two Python modules below and answer specific questions about their implementation.
+You are a code inspector specialized in Python HTTP library migrations (urllib → requests).
 
-Return ONLY valid JSON with exactly this structure — no markdown, no explanation:
+Your task: analyze both modules and extract implementation details that determine
+how tests must be structured and mocked.
 
+## Output
+Return ONLY valid JSON matching the schema below.
+No markdown fences, no explanation, no comments.
+
+## Schema
 {
   "original": {
-    "uses_gzip": <true|false>,
-    "response_strip_chars": <int — how many leading chars are stripped before JSON parse, e.g. 9 for responseData[9:], 0 if none>,
-    "raises_on_http_error": <true|false>,
-    "raises_on_network_error": <true|false>,
-    "generateRequestData_return_type": <"bytes"|"dict"|"str"|"other">,
-    "local_imports": [],
-    "missing_imports": [],
-    "module_style": "functions" | "class",
-    "main_class_name": "<nome da classe ou null>"
+    "module_style": str,                    // "functions" | "class"
+    "main_class_name": str,                 // class name or null if module_style is "functions"
+    "uses_gzip": bool,                      // true if response is read through gzip.GzipFile
+    "response_strip_chars": int,            // chars stripped before JSON parse, e.g. 9 for data[9:], 0 if none
+    "raises_on_http_error": bool,           // true if module explicitly raises on 4xx/5xx
+    "raises_on_network_error": bool,        // true if module explicitly raises on connection failure
+    "request_builder": {
+      "name": str,                          // function/method name that builds request data, or null
+      "return_type": str                    // "bytes" | "dict" | "str" | "other" | null
+    },
+    "local_imports": [str],                 // internal project imports that may cause ImportError
+    "missing_imports": [str]                // imports referenced but not defined in the module
   },
   "migrated": {
-    "uses_gzip": <true|false>,
-    "response_strip_chars": <int>,
-    "raises_on_http_error": <true|false>,
-    "raises_on_network_error": <true|false>,
-    "generateRequestData_return_type": <"bytes"|"dict"|"str"|"other">,
-    "local_imports": [],
-    "missing_imports": []
+    "module_style": str,
+    "main_class_name": str,
+    "uses_gzip": bool,
+    "response_strip_chars": int,
+    "raises_on_http_error": bool,           // true only if raise_for_status() is explicitly called
+    "raises_on_network_error": bool,
+    "request_builder": {
+      "name": str,
+      "return_type": str
+    },
+    "local_imports": [str],
+    "missing_imports": [str]
   },
-  "behavioral_diffs": []
+  "mock_strategy": {
+    "original": {
+      "http_layer": str,                    // "urllib.request.urlopen" | "urllib.request.Request" | other
+      "response_style": str,                // "read_bytes" | "read_gzip"
+      "network_error": str,                 // exact exception to raise: "urllib.error.URLError"
+      "http_error": str                     // exact exception to raise: "urllib.error.HTTPError"
+    },
+    "migrated": {
+      "http_layer": str,                    // "responses" (library) | "unittest.mock"
+      "response_style": str,                // "body_plain" | "body_prefixed" | "json"
+      "network_error": str,                 // exact exception: "requests.exceptions.ConnectionError"
+      "http_error": str                     // "responses.add with status 4xx/5xx"
+    }
+  },
+  "behavioral_diffs": [
+    {
+      "aspect": str,                        // "gzip_handling" | "raise_for_status" | "return_type" | "encoding" | "response_parsing"
+      "original": str,                      // one sentence describing original behavior
+      "migrated": str                       // one sentence describing migrated behavior
+    }
+  ]
 }
 
-ORIGINAL CODE:
+## Migration Context
+ORIGINAL uses urllib:
+  - gzip.GzipFile(fileobj=response) indicates uses_gzip=true
+  - data[N:] before json.loads indicates response_strip_chars=N
+  - explicit try/except on urllib.error.HTTPError indicates raises_on_http_error=true
+  - generateRequestData returning urlencode().encode() means return_type="bytes"
+
+MIGRATED uses requests:
+  - raise_for_status() indicates raises_on_http_error=true — absence means false
+  - gzip is always automatic — uses_gzip is almost always false
+  - generateRequestData returning a dict means return_type="dict"
+  - response_strip_chars applies to .text before json.loads, same as original
+
+## Constraints
+  - If you cannot determine a value with certainty, use null — do not guess
+  - raises_on_http_error for migrated must be false unless raise_for_status() is explicitly present
+  - Do not infer behavior that is not explicitly in the source code
+
+ORIGINAL MODULE (urllib):
 {original_code}
 
-MIGRATED CODE:
+MIGRATED MODULE (requests):
 {migrated_code}
 """.strip()
 
 PROMPT_GENERATOR = """
-You are a Python test engineer. Generate a single pytest file that proves functional equivalence between original_module and migrated_module.
+You are a Python test engineer specialized in urllib → requests migration testing.
 
-═══════════════════════════════════════════════════════
-URLLIB → REQUESTS MIGRATION
-The two libraries behave differently. Read the rules carefully.
-═══════════════════════════════════════════════════════
+Your task: generate a single pytest file that proves functional equivalence between
+original_module (urllib) and migrated_module (requests).
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RULE #1 — NO REAL HTTP REQUESTS
-Every test MUST mock ALL network calls.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## Output
+Output ONLY valid Python code.
+No markdown fences, no explanations, no TODOs, no comments explaining what to do.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RULE #2 — urllib SPECIFICS (original_module)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## Input data you have
+- MODULE QUIRKS: implementation details extracted by a code inspector
+- TEST PLAN: scenarios to cover, each with inputs and expected_behavior
+- Source code of both modules
 
-A) If uses_gzip=true in MODULE QUIRKS, the original module reads the response
-   through gzip.GzipFile(fileobj=response). The mock MUST serve real gzip bytes:
+## Structure of the generated file
 
-   PAYLOAD = {"key": "value"}
-   compressed = gzip.compress(json.dumps(PAYLOAD).encode())
-   buf = io.BytesIO(compressed)
-   mock_resp = MagicMock()
-   mock_resp.read.side_effect = buf.read   # ← side_effect = buf.read (callable)
-   mock_resp.readable.return_value = True
-   mock_resp.seekable.return_value = False
-   mock_resp.writable.return_value = False
-   mock_resp.__enter__ = lambda s: s
-   mock_resp.__exit__ = MagicMock(return_value=False)
+### 1. Imports
+Always import:
+  import json
+  import pytest
+  import responses
+  import requests
+  import requests.exceptions
+  from unittest.mock import MagicMock, patch
 
-   If uses_gzip=false, use plain bytes:
-   mock_resp.read.return_value = json.dumps(PAYLOAD).encode('utf-8')
+Import conditionally based on MODULE QUIRKS:
+  - If original.uses_gzip is true:  import gzip, import io
+  - If original.uses_gzip is false: do NOT import gzip or io
 
-B) response_strip_chars slice (N chars) happens INSIDE the module — do NOT apply
-   it in your tests. When mocking internal methods, include the prefix:
+Import the modules under test:
+  - If module_style is "class":
+      from original_module import {main_class_name} as OriginalClass
+      from migrated_module import {main_class_name} as MigratedClass
+  - If module_style is "functions":
+      from original_module import <only the functions used in tests>
+      from migrated_module import <only the functions used in tests>
 
-   PREFIX = "X" * N   # N = response_strip_chars from MODULE QUIRKS
-   with patch.object(scraper, 'executeRequest', return_value=PREFIX + json.dumps(PAYLOAD)):
-       scraper.scrapeConversation(False)
+Always import urllib errors for original mocks:
+  import urllib.error
+  import urllib.request
 
-C) urllib errors:
-   - Network: side_effect=urllib.error.URLError("reason")
-   - HTTP:    side_effect=urllib.error.HTTPError(url, code, msg, {}, None)
+### 2. Fixtures
+Create pytest fixtures for both module instances.
+Read the __init__ signatures from the source code — they WILL differ between modules.
+One fixture per class. If module_style is "functions", skip this section.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RULE #3 — requests SPECIFICS (migrated_module)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Example:
+  @pytest.fixture
+  def original():
+      return OriginalClass(param1, param2)
 
-A) requests decompresses gzip automatically — no gzip in mocks.
+  @pytest.fixture
+  def migrated():
+      return MigratedClass(param1)
 
-B) If response_strip_chars > 0 in MODULE QUIRKS, the migrated executeRequest
-   strips that many chars internally. The mock body MUST include the prefix:
+### 3. Tests
+One test function per scenario in TEST PLAN.
+Name format: test_{id}_{function_pair}_{category}  (e.g. test_TC001_get_user_happy_path)
 
-   PREFIX = "X" * <response_strip_chars>
-   responses.add(responses.POST, 'https://example.com/endpoint',
-                 body=PREFIX + json.dumps(PAYLOAD), status=200)
+## Mocking rules
 
-   DO NOT use json=PAYLOAD — use body=PREFIX+json.dumps(PAYLOAD).
+### Original module (urllib)
+Use mock_strategy.original from MODULE QUIRKS.
 
-C) HTTP error assertions — ONLY assert raises if raises_on_http_error=true
-   in MODULE QUIRKS for that module.
+If original.uses_gzip is true, mock MUST serve real gzip bytes:
+  PAYLOAD = {{...}}
+  compressed = gzip.compress(json.dumps(PAYLOAD).encode())
+  buf = io.BytesIO(compressed)
+  mock_resp = MagicMock()
+  mock_resp.read.side_effect = buf.read    # side_effect=callable, NOT return_value
+  mock_resp.readable.return_value = True
+  mock_resp.seekable.return_value = False
+  mock_resp.writable.return_value = False
+  mock_resp.__enter__ = lambda s: s
+  mock_resp.__exit__ = MagicMock(return_value=False)
 
-D) requests errors:
-   - Network: responses.add(..., body=requests.exceptions.ConnectionError())
-   - HTTP:    responses.add(..., status=404)
+If original.uses_gzip is false:
+  mock_resp.read.return_value = json.dumps(PAYLOAD).encode('utf-8')
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RULE #4 — WHAT TO TEST
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+For network errors:
+  side_effect = urllib.error.URLError("connection refused")
 
-Good candidates:
-  - generateRequestData: pure method, no mocking.
-    original returns bytes (urlencode+encode), migrated returns dict.
-    Normalize for comparison.
-  - executeRequest: mock HTTP layer as shown above
-  - __init__ attribute checks
+For HTTP errors:
+  side_effect = urllib.error.HTTPError(url, status_code, "reason", {{}}, None)
 
-Bad candidates (skip):
-  - scrapeConversation: too many filesystem side effects
-  - main(): calls sys.exit
+### Migrated module (requests)
+Use mock_strategy.migrated from MODULE QUIRKS.
+Always use @responses.activate decorator — NEVER as context manager.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RULE #5 — CONSTRUCTOR DIFFERENCES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+If migrated.response_strip_chars > 0, body MUST include the prefix:
+  PREFIX = "X" * {response_strip_chars}
+  responses.add(responses.POST, url, body=PREFIX + json.dumps(PAYLOAD), status=200)
+  # DO NOT use json=PAYLOAD when strip_chars > 0
 
-The two classes WILL have different __init__ signatures.
-Read them carefully and instantiate each correctly.
+If migrated.response_strip_chars == 0:
+  responses.add(responses.POST, url, json=PAYLOAD, status=200)
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RULE #6 — MANDATORY IMPORTS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+For network errors:
+  responses.add(responses.POST, url, body=requests.exceptions.ConnectionError())
 
-import urllib.parse
-import urllib.error
-import urllib.request
-import gzip
-import io
-import json
-import responses
-import requests
-from unittest.mock import MagicMock, patch
-import pytest
-Read MODULE QUIRKS to decide:
+For HTTP errors:
+  responses.add(responses.POST, url, status=404)
 
-If module_style == "functions":
-  Import only the functions you actually use, e.g.:
-    from original_module import fetch_users, create_user
-  DO NOT import ConversationScraper — it does not exist.
+## Assert rules — CRITICAL
+This is the most important section. Weak asserts invalidate the entire equivalence test.
 
-If module_style == "class":
-  from original_module import {main_class_name} as OriginalClass
-  from migrated_module import {main_class_name} as MigratedClass
+### Rule A — Always assert the return value, never just execution
+  # WRONG — proves nothing
+  original.get_user(1)
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RULE #7 — OUTPUT FORMAT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # WRONG — too weak
+  assert result is not None
 
-Output ONLY valid Python code. No markdown fences, no explanations, no TODO.
+  # CORRECT — proves the value
+  assert result == {{"id": 1, "name": "Alice"}}
+
+### Rule B — For functions with different return types, normalize before comparing
+request_builder in original returns bytes, in migrated returns dict.
+Normalize to dict for comparison:
+  import urllib.parse
+  orig_bytes = original.{request_builder_name}(inputs)
+  orig_dict  = dict(urllib.parse.parse_qsl(orig_bytes.decode()))
+  mig_dict   = migrated.{request_builder_name}(inputs)
+  assert orig_dict == mig_dict
+
+### Rule C — For error scenarios, assert the specific exception type and message
+  # WRONG
+  with pytest.raises(Exception):
+      ...
+
+  # CORRECT for original
+  with pytest.raises(urllib.error.URLError, match="connection refused"):
+      ...
+
+  # CORRECT for migrated (only if raises_on_http_error is true in MODULE QUIRKS)
+  with pytest.raises(requests.exceptions.HTTPError):
+      ...
+
+### Rule D — Assert raises on migrated ONLY if raises_on_http_error is true
+If migrated.raises_on_http_error is false, assert the function returns normally
+even on 4xx/5xx — do NOT assert raises.
+
+### Rule E — For response parsing tests, assert specific fields, not the whole object
+  # WRONG
+  assert result == response
+
+  # CORRECT
+  assert result["id"] == 42
+  assert result["status"] == "active"
+
+## What to test
+Good candidates (pure logic or mockable HTTP):
+  - request_builder function (no mocking needed — pure function)
+  - executeRequest or equivalent (mock HTTP layer)
+  - __init__ attribute assignment
+
+Skip these (too many side effects):
+  - Functions that write to filesystem (open, write, os.path)
+  - Functions that call sys.exit
+  - Orchestrator functions that only call other already-tested functions
 
 MODULE QUIRKS:
 {module_quirks}
 
-ORIGINAL CODE:
-{original_code}
-
-MIGRATED CODE:
-{migrated_code}
-
 TEST PLAN:
 {test_plan}
+
+ORIGINAL MODULE (urllib):
+{original_code}
+
+MIGRATED MODULE (requests):
+{migrated_code}
 """.strip()
 
 PROMPT_REPORT = """
-You are a report generator. Output a concise Markdown report.
+You are a senior engineering reviewer writing a migration equivalence report.
 
-Structure:
-# Equivalence Test Report
+
+Output ONLY valid Markdown. No preamble, no explanation outside the report.
+
+---
+
+# Equivalence Report — urllib → requests Migration
+
 **Generated:** {timestamp}
 
-## Decision: [APPROVED / CONDITIONAL / REJECTED]
-[1 sentence summary]
+---
+
+## Verdict: [APPROVED / CONDITIONAL / REJECTED]
+
+> [One sentence: what this means for the migration PR — can it be merged, does it need fixes, or is it blocked?]
+
+---
 
 ## Test Results
+
 | Metric | Value |
 |---|---|
-| Valid baseline (tests passing on original) | N |
-| Passed on both (confirmed equivalent) | N |
-| Regressions (pass original, fail migrated) | N |
-| Inversions (fail original, pass migrated) | N |
+| Valid baseline (original passing) | N |
+| Confirmed equivalent (pass on both) | N |
+| Regressions (pass original → fail migrated) | N |
+| Inversions (fail original → pass migrated) | N |
 | Symmetric failures (fail on both — noise) | N |
-| Equivalence rate (regression-based) | N% |
+| Equivalence rate | N% |
 
-## Behavior Change Analysis
-### Regressions (migration broke something)
-[list or "None"]
+---
 
-### Inversions (migration fixed or changed something)
-[list or "None — or note if this looks like a bug fix vs behavior change"]
+## Behavioral Analysis
 
-### Symmetric Failures (generation noise, ignored)
-[list or "None"]
+###  Regressions — Migration Broke These
+<!-- If none: write "None detected." -->
+<!-- If any: list each test ID + one sentence on WHAT likely broke and WHERE to look -->
+<!-- Example:
+- `test_TC003_get_user_network_error` — network error no longer raises on migrated; check if raise_for_status() is missing
+- `test_TC007_parse_response_http_error` — 4xx response silently returns instead of raising; migrated may lack error handling
+-->
+
+### Inversions — Migrated Behaves Differently (Review Required)
+<!-- If none: write "None detected." -->
+<!-- For each: classify as one of: [likely bug fix | behavior change | test artifact] + one sentence why -->
+<!-- Example:
+- `test_TC005_gzip_response` — [behavior change] original required manual gzip decompression; migrated handles it automatically
+-->
+
+### Symmetric Failures — Noise (Both Failed, Ignored)
+<!-- If none: write "None." -->
+<!-- List test IDs only — these are generation artifacts, not migration issues -->
+
+---
+
+## Actionable Recommendations
+<!-- Only include this section if verdict is CONDITIONAL or REJECTED -->
+<!-- Be specific: name the function, the behavior, and what to check -->
+<!-- Example:
+1. `executeRequest()` — verify that `raise_for_status()` is called after every POST; original raised on 4xx via HTTPError
+2. `parseResponse()` — confirm strip logic (`data[9:]`) is preserved; migrated uses `.text` which may include the prefix
+-->
+
+---
 
 ## Coverage
+
 | Module | Line Coverage |
 |---|---|
-| Original | N% |
-| Migrated | N% |
+| Original (urllib) | N% |
+| Migrated (requests) | N% |
 
-**Note:** coverage measures code execution, not behavioral equivalence.
+>  Coverage measures code execution, not behavioral correctness. A module can have 100% coverage and still return wrong values.
+
+---
 
 ## Warnings
-[unreliable results, generation errors, or "None"]
+<!-- Unreliable baseline, generation errors, or "None." -->
 
-Rules:
-- APPROVED if equivalence_rate >= 95% and valid_baseline >= 3
-- CONDITIONAL if equivalence_rate >= 85% and valid_baseline >= 3
-- REJECTED if equivalence_rate < 85% OR valid_baseline < 3
-- Output ONLY Markdown
+---
 
-EVALUATION:
+## Verdict Rules Applied
+- **APPROVED** — equivalence_rate ≥ 95% AND valid_baseline ≥ 3
+- **CONDITIONAL** — equivalence_rate ≥ 85% AND valid_baseline ≥ 3 (merge after fixing regressions)
+- **REJECTED** — equivalence_rate < 85% OR valid_baseline < 3 (do not merge)
+
+---
+
+EVALUATION DATA:
 {final_evaluation}
-
-TIMESTAMP: {timestamp}
 """.strip()
 
 # ── Utils ─────────────────────────────────────────────────────────────────────
