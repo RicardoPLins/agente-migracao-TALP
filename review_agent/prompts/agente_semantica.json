@@ -178,6 +178,7 @@
     "  - [COMPAT][P1] `mergePages` (line 120) — `break` removed from pagination loop. Trigger: loop continues after last page, duplicating or corrupting results.",
     "",
     "Use GIT DIFF for '+' changes and SNIPPETS for context. STRUCTURED DIFF lists affected symbols.",
+    "Write all findings in English.",
     "Be direct: why it is a problem + the realistic scenario where it manifests.",
     "Tone: objective and helpful. No 'Great work', no 'Congratulations', no accusatory language.",
     "",

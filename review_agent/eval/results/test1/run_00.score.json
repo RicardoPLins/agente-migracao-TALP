@@ -14,12 +14,14 @@
   "veredito_esperado": "APROVADO_COM_RESSALVAS",
   "veredito_ok": true,
   "strict_pass": true,
+  "schema_valido": true,
+  "schema_warnings": [],
   "agentes_acionados": [
     "semantica",
     "seguranca",
     "lint"
   ],
   "cobertura_3_agentes": true,
-  "total_achados": 22,
+  "total_achados": 2,
   "run_id": 0
 }

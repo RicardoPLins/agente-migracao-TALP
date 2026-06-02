@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import logging
 import os
 import sys
 from datetime import datetime, timezone
@@ -19,6 +20,8 @@ from typing import Any
 EVAL_DIR = Path(__file__).resolve().parent
 REVIEW_DIR = EVAL_DIR.parent
 REPO_ROOT = REVIEW_DIR.parent
+
+logger = logging.getLogger(__name__)
 
 
 def _load_dotenv() -> None:
@@ -39,18 +42,37 @@ def _load_review_module():
     )
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
-    spec.loader.exec_module(mod)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception as exc:
+        raise RuntimeError(
+            "Falha ao carregar review-agent.py "
+            f"({type(exc).__name__}: {exc}). "
+            "Verifique imports/sintaxe do módulo de review."
+        ) from exc
     return mod
 
 
 def _read_pair(task: dict[str, Any]) -> tuple[str, str]:
-    original = (REVIEW_DIR / task["original"]).read_text(encoding="utf-8")
-    migrado = (REVIEW_DIR / task["migrado"]).read_text(encoding="utf-8")
+    try:
+        original_path = REVIEW_DIR / task["original"]
+        migrado_path = REVIEW_DIR / task["migrado"]
+    except KeyError as exc:
+        task_id = task.get("id", "<sem id>")
+        raise KeyError(f"task '{task_id}' sem campo obrigatório {exc!s}") from exc
+
+    original = original_path.read_text(encoding="utf-8")
+    migrado = migrado_path.read_text(encoding="utf-8")
     return original, migrado
 
 
-def run_single(mod, task: dict[str, Any], run_id: int) -> dict:
-    original, migrado = _read_pair(task)
+def run_single(
+    mod,
+    task: dict[str, Any],
+    run_id: int,
+    original: str,
+    migrado: str,
+) -> dict:
     result = mod._executar_grafo(original, migrado)
     return {
         "task_id": task["id"],
@@ -62,12 +84,35 @@ def run_single(mod, task: dict[str, Any], run_id: int) -> dict:
         "achados_seguranca": result.get("achados_seguranca", []),
         "achados_lint": result.get("achados_lint", []),
         "deve_reprocessar": result.get("deve_reprocessar", False),
+        "veredito": result.get("veredito", ""),
         "iteracoes": result.get("iteracoes", 0),
         "relatorio_final": result.get("relatorio_final", ""),
     }
 
 
+def _failed_run_payload(task_id: str, run_id: int, exc: Exception) -> dict[str, Any]:
+    return {
+        "task_id": task_id,
+        "run_id": run_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "erro": str(exc),
+        "erro_tipo": type(exc).__name__,
+        "agentes_acionados": [],
+        "achados_estruturados": [],
+        "achados_semantica": [],
+        "achados_seguranca": [],
+        "achados_lint": [],
+        "deve_reprocessar": False,
+        "iteracoes": 0,
+        "relatorio_final": "",
+    }
+
+
 def main() -> int:
+    logging.basicConfig(
+        level=os.getenv("REVIEW_EVAL_LOG_LEVEL", "INFO").upper(),
+        format="%(levelname)s:%(name)s:%(message)s",
+    )
     parser = argparse.ArgumentParser(
         description="Avaliação do review_agent contra gold labels (somente REVIEW_AGENT_DIR)."
     )
@@ -105,13 +150,20 @@ def main() -> int:
     sys.path.insert(0, str(EVAL_DIR))
     from score import aggregate_task_runs, format_report, load_gold, score_task
 
-    gold = load_gold(args.gold)
+    try:
+        gold = load_gold(args.gold)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        print(f"ERRO: falha ao carregar gold '{args.gold}': {exc}")
+        return 1
+
     task_ids = args.tasks or list(gold["tasks"].keys())
 
     mod = None
+    veredito_fn = None
     if not args.score_only:
         _load_dotenv()
         mod = _load_review_module()
+        veredito_fn = getattr(mod, "_veredito_canonico", None)
 
     args.output.mkdir(parents=True, exist_ok=True)
     exit_code = 0
@@ -123,6 +175,19 @@ def main() -> int:
             continue
 
         gold_task = gold["tasks"][task_id]
+        original = ""
+        migrado = ""
+        if not args.score_only:
+            try:
+                original, migrado = _read_pair(gold_task)
+            except (FileNotFoundError, OSError, KeyError) as exc:
+                print(
+                    f"ERRO: arquivos da tarefa '{task_id}' inválidos em "
+                    f"{args.gold}: {exc}"
+                )
+                exit_code = 1
+                continue
+
         task_dir = args.output / task_id
         task_dir.mkdir(parents=True, exist_ok=True)
         per_run_scores: list[dict] = []
@@ -138,20 +203,44 @@ def main() -> int:
             else:
                 assert mod is not None
                 print(f"[{task_id}] run {run_id + 1}/{args.runs} …")
-                payload = run_single(mod, gold_task, run_id)
+                try:
+                    payload = run_single(mod, gold_task, run_id, original, migrado)
+                except Exception as exc:
+                    logger.error(
+                        "Run %d da task %s falhou: %s",
+                        run_id,
+                        task_id,
+                        exc,
+                        exc_info=True,
+                    )
+                    payload = _failed_run_payload(task_id, run_id, exc)
+                    exit_code = 1
                 out_path.write_text(
                     json.dumps(payload, ensure_ascii=False, indent=2),
                     encoding="utf-8",
                 )
 
-            scored = score_task(payload, gold_task)
-            scored["run_id"] = run_id
-            per_run_scores.append(scored)
-            score_path = task_dir / f"run_{run_id:02d}.score.json"
-            score_path.write_text(
-                json.dumps(scored, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            try:
+                scored = score_task(payload, gold_task, veredito_fn=veredito_fn)
+                scored["run_id"] = run_id
+                if payload.get("erro"):
+                    scored["erro"] = payload["erro"]
+                    scored["erro_tipo"] = payload.get("erro_tipo", "Exception")
+                per_run_scores.append(scored)
+                score_path = task_dir / f"run_{run_id:02d}.score.json"
+                score_path.write_text(
+                    json.dumps(scored, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            finally:
+                if per_run_scores:
+                    agg = aggregate_task_runs(per_run_scores)
+                    report = format_report(task_id, per_run_scores, agg)
+                    (task_dir / "summary.md").write_text(report, encoding="utf-8")
+                    (task_dir / "aggregate.json").write_text(
+                        json.dumps(agg, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
 
         if not per_run_scores:
             continue

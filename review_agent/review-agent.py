@@ -27,6 +27,7 @@ import urllib.error
 import urllib.request
 import shutil
 import logging
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any, Literal, TypedDict
@@ -352,19 +353,73 @@ def _run_git_diff(codigo_original: str, codigo_migrado: str) -> str | None:
         if result.returncode in (0, 1):
             return result.stdout.strip() or "(sem diferenças entre os arquivos)"
         
-        logger.error(f"Falha inesperada no git diff. Exit code: {result.returncode}, Stderr: {result.stderr.strip()}")
+        logger.error(
+            "Falha inesperada no git diff. Exit code: %s, Stderr: %s",
+            result.returncode,
+            result.stderr.strip(),
+        )
         return None
 
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except subprocess.TimeoutExpired:
         logger.warning("Timeout de 15s excedido ao executar git diff.")
         return None
     except FileNotFoundError:
-        logger.error("Binário 'git' não encontrado no PATH durante a execução do _run_git_diff.")
+        logger.error(
+            "Binário 'git' não encontrado no PATH durante a execução do _run_git_diff."
+        )
         return None
     finally:
         for path in (tmp_original, tmp_migrado):
             if path and os.path.exists(path):
                 os.unlink(path)
+
+
+_IMPORT_RE = re.compile(r"^\s*(?:from\s+([.\w]+)\s+import\s+(.+)|import\s+(.+))")
+
+
+def _normalizar_modulo_importado(nome: str) -> str | None:
+    nome = nome.split("#", 1)[0].strip()
+    if not nome or nome.startswith("."):
+        return None
+    nome = nome.split(" as ", 1)[0].strip()
+    if not nome:
+        return None
+    return nome.split(".", 1)[0]
+
+
+def _extrair_dependencias_imports(codigo: str) -> set[str]:
+    """Extrai módulos importados de forma determinística via linhas import/from."""
+    deps: set[str] = set()
+    for linha in codigo.splitlines():
+        match = _IMPORT_RE.match(linha)
+        if not match:
+            continue
+
+        from_mod, _from_names, import_names = match.groups()
+        if from_mod:
+            dep = _normalizar_modulo_importado(from_mod)
+            if dep:
+                deps.add(dep)
+            continue
+
+        for item in (import_names or "").split(","):
+            dep = _normalizar_modulo_importado(item)
+            if dep:
+                deps.add(dep)
+    return deps
+
+
+def _recalcular_dependencias_diff(
+    diff: dict[str, Any],
+    codigo_original: str,
+    codigo_migrado: str,
+) -> dict[str, Any]:
+    """Sobrescreve deps adicionadas/removidas com base nos imports reais."""
+    deps_original = _extrair_dependencias_imports(codigo_original)
+    deps_migrado = _extrair_dependencias_imports(codigo_migrado)
+    diff["added_dependencies"] = sorted(deps_migrado - deps_original)
+    diff["removed_dependencies"] = sorted(deps_original - deps_migrado)
+    return diff
 
 
 def no_parser(state: CodeReviewState) -> dict:
@@ -392,9 +447,19 @@ def no_parser(state: CodeReviewState) -> dict:
     try:
         response = _invocar_llm(llm, prompt)
         diff = json.loads(_strip_md_fences(response.content))
-    except json.JSONDecodeError:
-        logger.error(f"Falha na invocação do LLM ou no parsing do no_parser: {str(e)}")
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON inválido no no_parser: {e}")
         diff = {"raw": response.content, "parse_error": True}
+    except Exception as e:                      # falha de LLM/rede
+        logger.error(f"Falha ao invocar LLM no no_parser: {e}", exc_info=True)
+        diff = {"raw": "", "parse_error": True}
+
+    if isinstance(diff, dict):
+        diff = _recalcular_dependencias_diff(
+            diff,
+            state["codigo_original"],
+            state["codigo_migrado"],
+        )
 
     return {
         "raw_diff":        raw_diff or "",
@@ -694,10 +759,10 @@ def _checar_http_sem_raise(
         "linha": indice.get(nome),
         "linha_corrigida": False,
         "descricao": (
-            "urllib.request.urlopen levanta HTTPError em 4xx/5xx; "
-            "requests.post/get sem raise_for_status() ignora status HTTP de erro"
+            "urllib.request.urlopen raises HTTPError for 4xx/5xx responses; "
+            "requests.post/get without raise_for_status() silently ignores HTTP error status"
         ),
-        "trigger": "urlopen substituído por requests sem verificação de status (4xx/5xx)",
+        "trigger": "urlopen replaced by requests without status verification for 4xx/5xx responses",
         "agente": "deterministico",
         "raw": "",
     }
@@ -734,10 +799,10 @@ def _checar_early_return_loop(
         "linha": indice.get(nome),
         "linha_corrigida": False,
         "descricao": (
-            "Tratamento de erro no loop de payload/actions usa return em vez de continue — "
-            "interrompe retry do while que existia no original"
+            "Error handling in the payload/actions loop uses return instead of continue, "
+            "aborting the retry loop that existed in the original code"
         ),
-        "trigger": "return antecipado no loop; original usava continue para retry após erro",
+        "trigger": "early return inside the loop; the original used continue to retry after an error",
         "agente": "deterministico",
         "raw": "",
     }
@@ -788,7 +853,7 @@ def _mesclar_achados_deterministicos(
             texto = f"{a.get('descricao') or ''}. {a.get('trigger') or ''}".lower()
             if "raise_for_status" in desc_extra:
                 return bool(re.search(r"raise_for_status|4xx|5xx|status|requests", texto))
-            if "return em vez de continue" in desc_extra:
+            if "return instead of continue" in desc_extra:
                 return bool(re.search(r"\breturn\b|\bcontinue\b|time\.sleep|retry|loop", texto))
             return a.get("prefixo") == achado.get("prefixo")
 
@@ -906,6 +971,15 @@ def _validar_e_reclassificar_achado(
     texto = f"{desc}. {trigger}"
 
     if prefixo == "INFO" and "no relevant" in texto.lower():
+        return None
+
+    if (
+        prefixo == "INFO"
+        and sev == "P3"
+        and not achado.get("simbolo")
+        and not achado.get("linha")
+        and not trigger.strip()
+    ):
         return None
 
     if not achado.get("prefixo") and not _tem_evidencia_forte(texto):
@@ -1033,7 +1107,7 @@ def no_semantico(state: CodeReviewState) -> dict:
     """
     llm = _get_llm()
     critica = (
-        f"\n⚠️  CRÍTICA DA ITERAÇÃO ANTERIOR — corrija os pontos abaixo:\n{state['motivo_rejeicao']}"
+        f"\n⚠️  PREVIOUS ITERATION CRITIQUE — fix the points below:\n{state['motivo_rejeicao']}"
         if state.get("motivo_rejeicao")
         else ""
     )
@@ -1055,9 +1129,9 @@ def no_semantico(state: CodeReviewState) -> dict:
         ]
     except Exception as e:
         logger.error(f"Erro ao invocar LLM no no_semantico: {str(e)}")
-        achados = [f"- [CONTRACT][P0] ⚠️ Falha crítica de infraestrutura no no_semantico: {str(e)}"]
+        achados = [f"- [CONTRACT][P0] Critical infrastructure failure in no_semantico: {str(e)}"]
     
-    return {"achados_semantica": achados or ["- Sem achados semânticos relevantes."]}
+    return {"achados_semantica": achados or ["- [INFO][P3] No relevant semantic findings."]}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1074,7 +1148,7 @@ def no_seguranca(state: CodeReviewState) -> dict:
     """
     llm = _get_llm()
     critica = (
-        f"\n⚠️  CRÍTICA DA ITERAÇÃO ANTERIOR — corrija os pontos abaixo:\n{state['motivo_rejeicao']}"
+        f"\n⚠️  PREVIOUS ITERATION CRITIQUE — fix the points below:\n{state['motivo_rejeicao']}"
         if state.get("motivo_rejeicao")
         else ""
     )
@@ -1096,22 +1170,22 @@ def no_seguranca(state: CodeReviewState) -> dict:
         ]
     except Exception as e:
         logger.error(f"Falha na invocação do LLM no no_seguranca: {str(e)}")
-        achados = [f"- [SECURITY][P0] ⚠️ Falha crítica de infraestrutura no agente de segurança: {str(e)}"]
+        achados = [f"- [SECURITY][P0] Critical infrastructure failure in the security agent: {str(e)}"]
 
-    return {"achados_seguranca": achados or ["- Sem achados de segurança relevantes."]}
+    return {"achados_seguranca": achados or ["- [INFO][P3] No relevant security findings."]}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Nó 4c – no_lint  (tool use determinístico via Ruff + interpretação LLM)
+# Nó 4c – no_lint  (tool use determinístico via Ruff/mypy + interpretação LLM)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _inferir_config_ruff(codigo_original: str, llm: BaseChatModel) -> dict:
     """
     Usa o LLM para inferir o estilo implícito do código original e retorna
-    uma configuração Ruff ajustada (line_length, regras, indent_width).
+    uma configuração Ruff ajustada (line_length e regras).
     """
     prompt = _render("agente_lint_config", codigo_original=codigo_original)
-    defaults = {"line_length": 88, "select": ["E", "W", "F", "I"], "ignore": [], "indent_width": 4}
+    defaults = {"line_length": 88, "select": ["E", "W", "F", "I"], "ignore": []}
     try:
         response = _invocar_llm(llm, prompt)
         config = json.loads(_strip_md_fences(response.content))
@@ -1119,7 +1193,6 @@ def _inferir_config_ruff(codigo_original: str, llm: BaseChatModel) -> dict:
             "line_length":  int(config.get("line_length", defaults["line_length"])),
             "select":       config.get("select", defaults["select"]),
             "ignore":       config.get("ignore", defaults["ignore"]),
-            "indent_width": int(config.get("indent_width", defaults["indent_width"])),
         }
     except Exception as e:
         logger.warning(f"Falha ao inferir config do Ruff via LLM. Usando defaults. Erro: {str(e)}")
@@ -1145,7 +1218,6 @@ def _run_ruff(code_str: str, config: dict) -> list[dict]:
             "ruff", "check", tmp_path,
             "--output-format=json",
             f"--line-length={config.get('line_length', 88)}",
-            #f"--indent-width={config.get('indent_width', 4)}",
             f"--select={select}",
             "--no-cache",
         ]
@@ -1156,25 +1228,112 @@ def _run_ruff(code_str: str, config: dict) -> list[dict]:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         
         if result.returncode not in (0, 1):
-            logger.error(f"Falha na execução do Ruff (exit code {result.returncode}). Stderr: {result.stderr.strip()}")
-            return None
+            logger.error(
+                "Falha na execução do Ruff (exit code %s). Stderr: %s",
+                result.returncode,
+                result.stderr.strip(),
+            )
+            return []
         if result.stdout.strip():
             issues = json.loads(result.stdout)
             # Remove o path absoluto do arquivo temporário de cada issue
             for issue in issues:
                 issue.pop("filename", None)
+                issue["tool"] = "ruff"
             return issues
         return []
 
     except subprocess.TimeoutExpired:
         logger.error("Timeout de 30s excedido ao executar verificação do Ruff.")
-        return None
+        return []
     except json.JSONDecodeError as e:
-        logger.error(f"Ruff retornou saída não-JSON inválida. Erro: {str(e)} | Stdout: {result.stdout.strip()[:200]}")
-        return None
+        logger.error(
+            "Ruff retornou saída não-JSON inválida. Erro: %s | Stdout: %s",
+            str(e),
+            result.stdout.strip()[:200],
+        )
+        return []
     except FileNotFoundError:
         logger.error("Binário 'ruff' não encontrado no PATH durante a execução.")
-        return None
+        return []
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+_MYPY_RE = re.compile(
+    r"^(?P<file>.*?):(?P<line>\d+)(?::(?P<col>\d+))?: "
+    r"(?P<level>error|note): (?P<msg>.*?)(?:\s+\[(?P<code>[^\]]+)\])?$"
+)
+
+
+def _parse_mypy_output(output: str) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    for line in output.splitlines():
+        match = _MYPY_RE.match(line.strip())
+        if not match or match.group("level") != "error":
+            continue
+        code = match.group("code") or "mypy"
+        column = int(match.group("col") or "1")
+        issues.append(
+            {
+                "tool": "mypy",
+                "code": code,
+                "message": match.group("msg").strip(),
+                "location": {
+                    "row": int(match.group("line")),
+                    "column": column,
+                },
+            }
+        )
+    return issues
+
+
+def _run_mypy(code_str: str) -> list[dict[str, Any]]:
+    """
+    Executa mypy de forma determinística e retorna erros em formato similar ao Ruff.
+    Falhas de infraestrutura degradam para lista vazia, com log.
+    """
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".py", encoding="utf-8", delete=False
+        ) as tmp:
+            tmp.write(code_str)
+            tmp_path = tmp.name
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "mypy",
+                tmp_path,
+                "--show-error-codes",
+                "--no-error-summary",
+                "--hide-error-context",
+                "--ignore-missing-imports",
+                "--check-untyped-defs",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        if result.returncode not in (0, 1):
+            logger.error(
+                "Falha na execução do mypy (exit code %s). Stderr: %s",
+                result.returncode,
+                result.stderr.strip(),
+            )
+            return []
+        return _parse_mypy_output(result.stdout)
+
+    except subprocess.TimeoutExpired:
+        logger.error("Timeout de 30s excedido ao executar verificação do mypy.")
+        return []
+    except FileNotFoundError:
+        logger.error("Python/mypy não encontrado durante a execução do mypy.")
+        return []
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
@@ -1209,11 +1368,11 @@ def _filtrar_novos_issues(
 
 def no_lint(state: CodeReviewState) -> dict:
     """
-    Valida lint e estilo do código migrado usando Ruff como tool use determinístico.
+    Valida lint, estilo e tipos usando Ruff/mypy como tool use determinístico.
 
     Pipeline interno:
     1. LLM infere o estilo implícito do código original → config Ruff dinâmica.
-    2. Ruff é executado em ambos os códigos (original e migrado) via subprocess.
+    2. Ruff e mypy são executados em ambos os códigos via subprocess.
     3. Filtro de regressão: isola apenas os *novos* issues introduzidos.
     4. LLM interpreta os novos issues avaliando severidade e contexto.
     """
@@ -1222,19 +1381,24 @@ def no_lint(state: CodeReviewState) -> dict:
     # 1 – Inferir estilo e gerar config Ruff
     ruff_config = _inferir_config_ruff(state["codigo_original"], llm)
 
-    # 2 – Executar Ruff em ambos os arquivos
-    issues_original = _run_ruff(state["codigo_original"], ruff_config)
-    issues_migrado  = _run_ruff(state["codigo_migrado"],  ruff_config)
+    # 2 – Executar Ruff/mypy em ambos os arquivos
+    ruff_original = _run_ruff(state["codigo_original"], ruff_config) or []
+    ruff_migrado = _run_ruff(state["codigo_migrado"], ruff_config) or []
+    mypy_original = _run_mypy(state["codigo_original"]) or []
+    mypy_migrado = _run_mypy(state["codigo_migrado"]) or []
 
     # 3 – Filtrar apenas novos issues
-    novos_issues = _filtrar_novos_issues(issues_original, issues_migrado)
+    novos_issues = (
+        _filtrar_novos_issues(ruff_original, ruff_migrado)
+        + _filtrar_novos_issues(mypy_original, mypy_migrado)
+    )
 
     if not novos_issues:
-        return {"achados_lint": ["- Nenhum novo issue de lint/style introduzido pela migração."]}
+        return {"achados_lint": ["- [INFO][P3] No new lint/style/type issues introduced by the migration."]}
 
     # 4 – LLM interpreta os novos issues (severidade + contexto)
     critica = (
-        f"\n⚠️  CRÍTICA DA ITERAÇÃO ANTERIOR — corrija os pontos abaixo:\n{state['motivo_rejeicao']}"
+        f"\n⚠️  PREVIOUS ITERATION CRITIQUE — fix the points below:\n{state['motivo_rejeicao']}"
         if state.get("motivo_rejeicao")
         else ""
     )
@@ -1254,12 +1418,12 @@ def no_lint(state: CodeReviewState) -> dict:
         ]
     except Exception as e:
         logger.error(f"Falha na invocação do LLM no no_lint: {str(e)}")
-        # Fallback: O LLM caiu, mas temos os dados brutos do Ruff.
+        # Fallback: O LLM caiu, mas temos os dados brutos das ferramentas.
         achados = [
-            f"- [INFO][P3] ⚠️ API indisponível para interpretar lint: {str(e)}",
-            f"- [INFO][P3] Ruff detectou {len(novos_issues)} novo(s) problema(s) de formatação não interpretado(s)."
+            f"- [INFO][P3] API unavailable while interpreting lint findings: {str(e)}",
+            f"- [INFO][P3] Ruff/mypy detected {len(novos_issues)} new issue(s) that were not interpreted."
         ]
-    return {"achados_lint": achados or ["- Nenhum novo issue relevante de lint/style identificado."]}
+    return {"achados_lint": achados or ["- [INFO][P3] No relevant new lint/style issues identified."]}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1267,6 +1431,35 @@ def no_lint(state: CodeReviewState) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 _MAX_ITERACOES = 3
+
+
+def _normalizar_decisao_critico(resultado: dict[str, Any]) -> tuple[str, str]:
+    """
+    O prompt do no_critico responde em inglês, mas o grafo usa estados internos
+    em português. Aceita ambos para manter robustez.
+    """
+    decisao_raw = (
+        resultado.get("decision")
+        or resultado.get("decisao")
+        or "approved"
+    )
+    motivo = (
+        resultado.get("rejection_reason")
+        or resultado.get("motivo_rejeicao")
+        or ""
+    )
+
+    decisao_norm = str(decisao_raw).strip().lower()
+    mapa_decisao = {
+        "approved": "aprovado",
+        "approve": "aprovado",
+        "aprovado": "aprovado",
+        "requires_refinement": "requer_refinamento",
+        "require_refinement": "requer_refinamento",
+        "requer_refinamento": "requer_refinamento",
+        "requer refinamento": "requer_refinamento",
+    }
+    return mapa_decisao.get(decisao_norm, "requer_refinamento"), str(motivo)
 
 
 def no_critico(state: CodeReviewState) -> dict:
@@ -1301,8 +1494,7 @@ def no_critico(state: CodeReviewState) -> dict:
     response = _invocar_llm(llm, prompt)
     try:
         resultado = json.loads(_strip_md_fences(response.content))
-        decisao = resultado.get("decisao", "aprovado")
-        motivo  = resultado.get("motivo_rejeicao", "")
+        decisao, motivo = _normalizar_decisao_critico(resultado)
     except json.JSONDecodeError:
         # Fail-secure: se não conseguimos ler o veredito, forçamos a rejeição.
         decisao = "requer_refinamento"
@@ -1507,14 +1699,25 @@ def _contar_severidades(achados: list[dict[str, Any]]) -> Counter[str]:
     return counts
 
 
-def _veredito(deve_reprocessar: bool, counts: Counter[str]) -> str:
+def _veredito_canonico(deve_reprocessar: bool, counts: Counter[str]) -> str:
     if deve_reprocessar:
-        return "🔄 **REPROCESSAR** — o migration_agent deve refazer a migração"
+        return "REPROCESSAR"
     if counts.get("P0", 0) > 0:
-        return "❌ **REPROVADO** — corrigir achados P0 antes do merge"
+        return "REPROVADO"
     if counts.get("P1", 0) > 0:
-        return "⚠️ **APROVADO COM RESSALVAS** — corrigir achados P1"
-    return "✅ **APROVADO**"
+        return "APROVADO_COM_RESSALVAS"
+    return "APROVADO"
+
+
+def _veredito(deve_reprocessar: bool, counts: Counter[str]) -> str:
+    veredito = _veredito_canonico(deve_reprocessar, counts)
+    mensagens = {
+        "REPROCESSAR": "🔄 **REPROCESSAR** — o migration_agent deve refazer a migração",
+        "REPROVADO": "❌ **REPROVADO** — corrigir achados P0 antes do merge",
+        "APROVADO_COM_RESSALVAS": "⚠️ **APROVADO COM RESSALVAS** — corrigir achados P1",
+        "APROVADO": "✅ **APROVADO**",
+    }
+    return mensagens[veredito]
 
 
 def _secao_por_severidade(
@@ -1816,6 +2019,11 @@ def _executar_grafo(codigo_original: str, codigo_migrado: str) -> dict:
     result = graph.invoke(initial_state)
     estado_final: CodeReviewState = {**initial_state, **result}
     estruturados = _achados_estruturados(estado_final)
+    deve_reprocessar = bool(result.get("deve_reprocessar", False))
+    veredito = _veredito_canonico(
+        deve_reprocessar,
+        _contar_severidades(estruturados),
+    )
     return {
         "raw_diff":          result.get("raw_diff", ""),
         "diff":              result.get("diff_estruturado", {}),
@@ -1825,7 +2033,8 @@ def _executar_grafo(codigo_original: str, codigo_migrado: str) -> dict:
         "achados_lint":      result.get("achados_lint", []),
         "achados_estruturados": estruturados,
         "iteracoes":         result.get("iteracao", 0),
-        "deve_reprocessar":  result.get("deve_reprocessar", False),
+        "deve_reprocessar":  deve_reprocessar,
+        "veredito":          veredito,
         "relatorio_final":   result.get("relatorio_final", ""),
     }
 
