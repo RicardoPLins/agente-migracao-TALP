@@ -66,6 +66,28 @@ INFERENCE_JSON_PATH = PROJECT_ROOT / "inferencia.json"
 
 # When this file is imported (e.g., by the API gateway), avoid writing files.
 WRITE_ARTIFACTS = __name__ == "__main__"
+
+
+def _criar_modelo_migracao():
+    """Create the LLM instance used by migration and refinement nodes."""
+    if _OLLAMA_DISPONIVEL:
+        return (
+            ChatOllama(
+                model=_OLLAMA_MODEL_ATIVO,
+                base_url=_OLLAMA_HOST,
+                temperature=0.0,
+            ),
+            f"Ollama ({_OLLAMA_MODEL_ATIVO})",
+        )
+
+    return (
+        ChatGroq(
+            model="qwen2.5:14b",
+            temperature=0.0,
+        ),
+        "Groq (qwen2.5:14b)",
+    )
+
 # =============================================================================
 # DATASET LOADING & TRAINING EXAMPLES
 # =============================================================================
@@ -178,6 +200,7 @@ class EstadoAgente(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     codigo_usuario: str
     codigo_migrado: str
+    feedback_revisao: str
     status: str
 
 
@@ -236,21 +259,9 @@ def no_migrar_com_llm(estado: EstadoAgente, exemplos_treino: list[dict], prompt_
         Updated state with migrated code
     """
     codigo_usuario = estado["codigo_usuario"]
-    
+
     try:
-        if _OLLAMA_DISPONIVEL:
-            model = ChatOllama(
-                model=_OLLAMA_MODEL_ATIVO,
-                base_url=_OLLAMA_HOST,
-                temperature=0.0,
-            )
-            backend_label = f"Ollama ({_OLLAMA_MODEL_ATIVO})"
-        else:
-            model = ChatGroq(
-                model="llama-3.3-70b-versatile",
-                temperature=0.0,
-            )
-            backend_label = "Groq (llama-3.3-70b-versatile)"
+        model, backend_label = _criar_modelo_migracao()
         
         # Create messages
         messages = [
@@ -294,6 +305,91 @@ Return ONLY the migrated Python code without any explanation or markdown.""")
     
     except Exception as e:
         erro_msg = f"❌ Erro na migração: {str(e)}"
+        return {
+            "messages": [AIMessage(content=erro_msg)],
+            "status": "erro"
+        }
+
+
+def no_refinar_com_feedback(estado: EstadoAgente, exemplos_treino: list[dict], prompt_sistema: str) -> dict:
+    """
+    Refine the migrated code using feedback from the review agent.
+
+    Args:
+        estado: Current state
+        exemplos_treino: Training examples for few-shot learning
+        prompt_sistema: System prompt with training examples
+
+    Returns:
+        Updated state with refined migrated code
+    """
+    feedback_revisao = estado.get("feedback_revisao", "").strip()
+    codigo_usuario = estado.get("codigo_usuario", "")
+    codigo_migrado_atual = estado.get("codigo_migrado", "")
+
+    if not feedback_revisao:
+        return {
+            "messages": [AIMessage(content="ℹ️ Nenhum feedback do review agent recebido; mantendo a migração atual.")],
+            "status": "validado"
+        }
+
+    if not codigo_migrado_atual.strip():
+        return {
+            "messages": [AIMessage(content="⚠️ Feedback recebido, mas não há código migrado para refinar.")],
+            "status": "erro"
+        }
+
+    try:
+        model, backend_label = _criar_modelo_migracao()
+
+        messages = [
+            SystemMessage(content=prompt_sistema),
+            HumanMessage(content=f"""Refine the existing urllib → requests migration using the review agent feedback.
+
+Original urllib code:
+```python
+{codigo_usuario}
+```
+
+Current migrated code:
+```python
+{codigo_migrado_atual}
+```
+
+Review feedback:
+{feedback_revisao}
+
+Return ONLY the improved Python code without any explanation or markdown.""")
+        ]
+
+        response = model.invoke(messages)
+        codigo_refinado = response if isinstance(response, str) else response.content
+
+        if "```" in codigo_refinado:
+            match = re.search(r"```(?:python|py)?\s*(.*?)\s*```", codigo_refinado, flags=re.DOTALL | re.IGNORECASE)
+            if match:
+                codigo_refinado = match.group(1).strip()
+
+        if codigo_refinado and not codigo_refinado.lstrip().startswith(("import ", "from ", "def ", "class ", "#", "\"\"\"", "'")):
+            linhas = codigo_refinado.splitlines()
+            inicio = 0
+            for idx, linha in enumerate(linhas):
+                texto = linha.lstrip()
+                if texto.startswith(("import ", "from ", "def ", "class ", "#", "\"\"\"", "'")):
+                    inicio = idx
+                    break
+            codigo_refinado = "\n".join(linhas[inicio:]).strip()
+
+        mensagem = f"🔁 Feedback do review aplicado com sucesso usando {backend_label}"
+
+        return {
+            "messages": [AIMessage(content=mensagem)],
+            "codigo_migrado": codigo_refinado,
+            "status": "feedback_aplicado"
+        }
+
+    except Exception as e:
+        erro_msg = f"❌ Erro ao aplicar feedback do review: {str(e)}"
         return {
             "messages": [AIMessage(content=erro_msg)],
             "status": "erro"
@@ -348,7 +444,7 @@ def no_validar_migracao(estado: EstadoAgente) -> dict:
 # CONDITIONAL EDGE
 # =============================================================================
 
-def decidir_proxima_etapa(estado: EstadoAgente) -> Literal["inferir", "migrar", "validar", "fim"]:
+def decidir_proxima_etapa(estado: EstadoAgente) -> Literal["inferir", "migrar", "refinar", "validar", "fim"]:
     """
     Decide next step based on current status.
     
@@ -365,6 +461,10 @@ def decidir_proxima_etapa(estado: EstadoAgente) -> Literal["inferir", "migrar", 
     elif status == "codigo_recebido":
         return "migrar"
     elif status == "migrado":
+        if estado.get("feedback_revisao", "").strip():
+            return "refinar"
+        return "validar"
+    elif status == "feedback_aplicado":
         return "validar"
     else:
         return "fim"
@@ -390,6 +490,7 @@ def criar_agente_migracao(exemplos_treino: list[dict], prompt_sistema: str):
     # Add nodes
     grafo.add_node("receber", no_receber_codigo)
     grafo.add_node("migrar", lambda estado: no_migrar_com_llm(estado, exemplos_treino, prompt_sistema))
+    grafo.add_node("refinar", lambda estado: no_refinar_com_feedback(estado, exemplos_treino, prompt_sistema))
     grafo.add_node("validar", no_validar_migracao)
     
     # Add edges
@@ -404,6 +505,15 @@ def criar_agente_migracao(exemplos_treino: list[dict], prompt_sistema: str):
     )
     grafo.add_conditional_edges(
         "migrar",
+        decidir_proxima_etapa,
+        {
+            "refinar": "refinar",
+            "validar": "validar",
+            "fim": END
+        }
+    )
+    grafo.add_conditional_edges(
+        "refinar",
         decidir_proxima_etapa,
         {
             "validar": "validar",
