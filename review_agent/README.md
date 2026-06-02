@@ -50,18 +50,28 @@ Entrada (original + migrado)
 | `relatorio_final`  | Template Markdown determinístico (seções 2–6) + resumo executivo LLM | Parcial    |
 
 
-Todos os nós com LLM usam a mesma instância:
+Todos os nós com LLM usam `_get_llm()`:
 
 ```python
-ChatGroq(api_key=os.getenv("API_3"), model_name="llama-3.3-70b-versatile")
+# Groq (default): REVIEW_LLM_PROVIDER=groq + API_3
+# Ollama local:    REVIEW_LLM_PROVIDER=ollama + REVIEW_OLLAMA_MODEL=qwen2.5:7b
 ```
+
+| Variável | Descrição | Default |
+|----------|-----------|---------|
+| `REVIEW_LLM_PROVIDER` | `groq` ou `ollama` | `groq` |
+| `API_3` | Chave Groq | — (obrigatória se `groq`) |
+| `REVIEW_GROQ_MODEL` | Modelo Groq | `llama-3.3-70b-versatile` |
+| `REVIEW_OLLAMA_MODEL` | Modelo Ollama | `qwen2.5:7b` |
+| `OLLAMA_BASE_URL` | API Ollama | `http://localhost:11434` |
+| `REVIEW_OLLAMA_NUM_CTX` | Janela de contexto (VRAM) | (padrão Ollama) |
 
 ---
 
 ## Pré-requisitos
 
 - Python **3.11+**
-- Chave de API na [Groq](https://console.groq.com/) — variável `API_3`
+- Backend LLM: **Groq** (`API_3`) ou **Ollama** local (`REVIEW_LLM_PROVIDER=ollama`)
 - [Ruff](https://docs.astral.sh/ruff/) no `PATH` (nó `no_lint`)
 - `git` no `PATH` (nó `no_parser` — fallback para LLM se ausente)
 

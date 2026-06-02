@@ -78,7 +78,7 @@ Se `git` ou `ruff` não forem encontrados, corrija o `PATH` ou reinstale antes d
 
 ---
 
-## Passo 4 — Configurar a chave Groq (`.env`)
+## Passo 4 — Configurar o backend LLM (`.env`)
 
 1. Copie o exemplo (se ainda não tiver um `.env`):
 
@@ -86,19 +86,47 @@ Se `git` ou `ruff` não forem encontrados, corrija o `PATH` ou reinstale antes d
    copy .env.example .env
    ```
 
-2. Edite `.env` na **raiz do repositório** e preencha pelo menos:
+2. Escolha **Groq** (nuvem) ou **Ollama** (local, sem cota diária).
 
-   ```env
-   API_3=gsk_sua_chave_aqui
+### Opção A — Groq (padrão)
+
+```env
+REVIEW_LLM_PROVIDER=groq
+API_3=gsk_sua_chave_aqui
+```
+
+Chave em: [console.groq.com/keys](https://console.groq.com/keys)
+
+### Opção B — Ollama local (`qwen2.5:7b`)
+
+1. Instale o [Ollama](https://ollama.com) e baixe o modelo:
+
+   ```powershell
+   ollama pull qwen2.5:7b
    ```
 
-   Obtenha a chave em: [console.groq.com/keys](https://console.groq.com/keys)
+2. No `.env`:
 
-3. O script `testReviewAgent.py` carrega automaticamente:
+   ```env
+   REVIEW_LLM_PROVIDER=ollama
+   REVIEW_OLLAMA_MODEL=qwen2.5:7b
+   ```
+
+   Opcional (GPU 6 GB — reduz contexto se faltar VRAM):
+
+   ```env
+   REVIEW_OLLAMA_NUM_CTX=8192
+   ```
+
+   `API_3` **não é necessária** neste modo.
+
+3. Confirme que o Ollama está rodando (`ollama serve` ou app na bandeja).
+
+4. O script `testReviewAgent.py` carrega automaticamente:
    - `review_agent/.env` (se existir)
    - `.env` na raiz do repo (prioridade menor — não sobrescreve variáveis já definidas)
 
-> **Importante:** o review agent usa **somente** `API_3`. Variáveis como `GROQ_API_KEY` ou `PROVIDER_API_KEY` são do pipeline integrado; não são necessárias para este teste standalone.
+> **Pipeline integrado:** `test_pipeline.py` ainda usa Groq no review por padrão. O modo Ollama vale para `testReviewAgent.py` e API `/review` do `review-agent.py`.
 
 ---
 

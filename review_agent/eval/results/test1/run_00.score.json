@@ -1,0 +1,25 @@
+{
+  "task_id": "test1",
+  "recall_R": 1.0,
+  "regressoes_detectadas": [
+    "http-no-raise",
+    "early-return-loop"
+  ],
+  "regressoes_esperadas": [
+    "http-no-raise",
+    "early-return-loop"
+  ],
+  "falsos_p1_preexistente": 0,
+  "veredito": "APROVADO_COM_RESSALVAS",
+  "veredito_esperado": "APROVADO_COM_RESSALVAS",
+  "veredito_ok": true,
+  "strict_pass": true,
+  "agentes_acionados": [
+    "semantica",
+    "seguranca",
+    "lint"
+  ],
+  "cobertura_3_agentes": true,
+  "total_achados": 22,
+  "run_id": 0
+}

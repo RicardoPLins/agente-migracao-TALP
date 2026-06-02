@@ -1,0 +1,43 @@
+{
+  "version": "v1",
+  "description": "Gold labels para avaliação isolada do review_agent (sem migration_agent / test_agent).",
+  "tasks": [
+    {
+      "id": "test1",
+      "original": "test1/original.py",
+      "migrado": "test1/migrado.py",
+      "veredito_esperado": "APROVADO_COM_RESSALVAS",
+      "regressoes": [
+        {
+          "id": "http-no-raise",
+          "simbolo": "executeRequest",
+          "severidade_min": "P1",
+          "keywords": ["httperror", "status", "raise_for_status", "4xx", "5xx", "urlopen"]
+        },
+        {
+          "id": "early-return-loop",
+          "simbolo": "scrapeConversation",
+          "severidade_min": "P1",
+          "keywords": ["return", "retry", "continue", "loop", "payload", "actions"]
+        }
+      ],
+      "preexistentes": [
+        {
+          "id": "json-decode-preexisting",
+          "simbolo": "scrapeConversation",
+          "keywords": ["jsondecodeerror", "json.load", "json.loads"]
+        },
+        {
+          "id": "slice-nine-preexisting",
+          "simbolo": "executeRequest",
+          "keywords": ["[9:]", "text[9", "response[9"]
+        },
+        {
+          "id": "os-system-preexisting",
+          "simbolo": "writeMessages",
+          "keywords": ["os.system", "shell"]
+        }
+      ]
+    }
+  ]
+}
