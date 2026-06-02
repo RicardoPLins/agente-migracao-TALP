@@ -4,7 +4,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent  # .../review_agent/
 sys.path.insert(0, str(HERE))
 
-# Carrega variáveis de .env se existir (GOOGLE_API_KEY, GROQ_API_KEY, etc.)
+# Carrega variáveis de .env se existir (API_3, etc.)
 try:
     from dotenv import load_dotenv
     load_dotenv(HERE / ".env", override=False)

@@ -1,6 +1,6 @@
 {
   "description": "Lint Agent — interprets new Ruff issues and verifies generalized migration anti-patterns in migrated code.",
-  "variables": ["critica", "novos_issues", "estilo_inferido", "codigo_migrado"],
+  "variables": ["critica", "novos_issues", "estilo_inferido", "codigo_migrado", "regras_migracao"],
   "skills_source": [
     {
       "skill": "Code Style, Typing & DRY",
@@ -58,6 +58,13 @@
     "- For migration anti-patterns: locate the exact line in MIGRATED CODE before reporting.",
     "- Do NOT use placeholder line numbers or copy a single line for unrelated issues.",
     "- If you cannot identify a valid line number, do NOT report the finding.",
+    "",
+    "══════════════════════════════════════════════════════════════",
+    "MIGRATION CONTRACT — urllib → requests (fixed rules)",
+    "══════════════════════════════════════════════════════════════",
+    "Cross-check migrated code against the contract below before STEP 0 anti-patterns.",
+    "",
+    "<<regras_migracao>>",
     "",
     "══════════════════════════════════════════════════════════════",
     "STEP 0 — Migration anti-patterns (generalized examples — verify in migrated code)",
