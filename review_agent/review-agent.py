@@ -14,11 +14,9 @@ sinaliza `deve_reprocessar = True` para que o migration_agent refaça a migraç�
 
 from __future__ import annotations
 
-import ast
 import json
 import os
 import subprocess
-import sys
 import tempfile
 from collections import Counter
 from pathlib import Path
@@ -27,7 +25,6 @@ from typing import Literal, TypedDict
 from fastapi import FastAPI, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_groq import ChatGroq
-from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 from pydantic import BaseModel
@@ -76,10 +73,6 @@ def _strip_md_fences(text: str) -> str:
 
 
 def _get_llm() -> ChatGroq:
-    # return ChatOllama(
-    #         model="llama3",
-    #         temperature=0
-    #     )
     api_key = os.getenv("API_3")
     if not api_key:
         raise ValueError("API_3 não encontrada nas variáveis de ambiente.")
@@ -179,39 +172,6 @@ def _run_git_diff(codigo_original: str, codigo_migrado: str) -> str | None:
                 os.unlink(path)
 
 
-def _extrair_imports_top_level(code_str: str) -> set[str]:
-    """Extrai nomes de módulo de nível superior via AST (determinístico)."""
-    try:
-        tree = ast.parse(code_str)
-    except SyntaxError:
-        return set()
-    mods: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                mods.add(alias.name.split(".")[0])
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            mods.add(node.module.split(".")[0])
-    return mods
-
-
-def _normalizar_deps_diff(
-    codigo_original: str,
-    codigo_migrado: str,
-    diff: dict,
-) -> dict:
-    """
-    Recalcula added/removed_dependencies a partir dos imports reais nos arquivos.
-    Corrige alucinações do LLM (ex.: listar gzip/os como removidos quando ainda importados).
-    """
-    orig = _extrair_imports_top_level(codigo_original)
-    mig = _extrair_imports_top_level(codigo_migrado)
-    diff = dict(diff)
-    diff["added_dependencies"] = sorted(mig - orig)
-    diff["removed_dependencies"] = sorted(orig - mig)
-    return diff
-
-
 def no_parser(state: CodeReviewState) -> dict:
     """
     Compara código original e migrado, extrai o diff estruturado e mapeia
@@ -239,13 +199,6 @@ def no_parser(state: CodeReviewState) -> dict:
         diff = json.loads(_strip_md_fences(response.content))
     except json.JSONDecodeError:
         diff = {"raw": response.content, "parse_error": True}
-
-    if isinstance(diff, dict) and not diff.get("parse_error"):
-        diff = _normalizar_deps_diff(
-            state["codigo_original"],
-            state["codigo_migrado"],
-            diff,
-        )
 
     return {
         "raw_diff":        raw_diff or "",
@@ -487,115 +440,11 @@ def _filtrar_novos_issues(
     return novos
 
 
-def _run_mypy(code_str: str) -> list[dict]:
-    """
-    Executa mypy sobre o código migrado e retorna achados do tipo error/warning.
-    Detecta chamadas de atributos inexistentes (attr-defined), erros de tipo, etc.
-    Usa sys.executable para garantir o mypy correto do ambiente virtual ativo.
-    Retorna [] em caso de falha (mypy não instalado, erro de sintaxe, etc.).
-    """
-    tmp_path: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".py", encoding="utf-8", delete=False
-        ) as tmp:
-            tmp.write(code_str)
-            tmp_path = tmp.name
-
-        result = subprocess.run(
-            [
-                sys.executable, "-m", "mypy", tmp_path,
-                "--ignore-missing-imports",
-                "--no-error-summary",
-                "--no-color-output",
-                "--show-error-codes",
-                "--check-untyped-defs",   # analyse bodies of unannotated functions
-                                          # (required to catch attr-defined inside methods)
-            ],
-            capture_output=True, text=True, timeout=60,
-        )
-        findings: list[dict] = []
-        # mypy output: path:line: severity: message  [error-code]
-        # Use greedy path match so Windows drive letters (C:\...) parse correctly.
-        pattern = re.compile(
-            r"^(.+):(\d+): (error|warning|note): (.+?)(?:\s+\[([^\]]+)\])?$"
-        )
-        for line in result.stdout.splitlines():
-            m = pattern.match(line)
-            if m and m.group(3) in ("error", "warning"):
-                findings.append({
-                    "line":     int(m.group(2)),
-                    "severity": m.group(3),
-                    "message":  m.group(4).strip(),
-                    "code":     m.group(5) or "",
-                })
-        return findings
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return []
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-
-
-def _mypy_para_achados(mypy_findings: list[dict]) -> list[str]:
-    """
-    Converte saída mypy em achados formatados — determinístico, sem LLM.
-    Regras fixas alinhadas ao error-code do mypy (única fonte determinística aqui).
-    """
-    achados: list[str] = []
-    for f in mypy_findings:
-        line = f.get("line", "?")
-        msg = f.get("message", "")
-        code = f.get("code", "")
-        sev = f.get("severity", "error")
-        if sev == "error" and code == "attr-defined":
-            achados.append(
-                f"- [BLOCKER][P0] line {line} — {msg} "
-                f"Trigger: AttributeError at runtime when this line executes."
-            )
-        elif sev == "error" and code == "var-annotated":
-            achados.append(
-                f"- [TYPING-DRY][P2] line {line} — {msg} "
-                f"Trigger: static type checker warning only; no runtime crash."
-            )
-        elif sev == "error":
-            achados.append(
-                f"- [WARNING][P1] line {line} — {msg} "
-                f"Trigger: type error may cause runtime failure."
-            )
-        elif sev == "warning":
-            achados.append(
-                f"- [WARNING][P2] line {line} — {msg} "
-                f"Trigger: type annotation regression."
-            )
-    return achados
-
-
-_LINHA_ACHADO = re.compile(r"\bline\s+(\d+)\b", re.IGNORECASE)
-
-
-def _filtrar_achados_linha_invalida(codigo: str, achados: list[str]) -> list[str]:
-    """
-    Descarta achados LLM cujo número de linha não existe no código migrado.
-    Achados mypy já vêm com linhas validadas pelo compilador.
-    """
-    total = len(codigo.splitlines())
-    validos: list[str] = []
-    for achado in achados:
-        m = _LINHA_ACHADO.search(achado)
-        if not m:
-            continue  # exige linha explícita
-        linha = int(m.group(1))
-        if 1 <= linha <= total:
-            validos.append(achado)
-    return validos
-
-
 def no_lint(state: CodeReviewState) -> dict:
     """
-    Valida lint e estilo do código migrado: Ruff + mypy (determinísticos) + LLM.
+    Valida lint e estilo do código migrado usando Ruff como tool use determinístico.
 
-    Pipeline interno (iteração 1):
+    Pipeline interno:
     1. LLM infere o estilo implícito do código original → config Ruff dinâmica.
     2. Ruff é executado em ambos os códigos (original e migrado) via subprocess.
     3. Filtro de regressão: isola apenas os *novos* issues introduzidos.
@@ -624,7 +473,7 @@ def no_lint(state: CodeReviewState) -> dict:
     )
     prompt = _render(
         "agente_lint_interpretacao",
-        critica="",
+        critica=critica,
         novos_issues=json.dumps(novos_issues, ensure_ascii=False, indent=2),
         estilo_inferido=json.dumps(ruff_config, ensure_ascii=False, indent=2),
         codigo_migrado=state["codigo_migrado"],
@@ -722,66 +571,10 @@ def _rota_pos_critico(
 # Nó 6 – Relatório Final
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _achados_relevantes(achados: list[str]) -> list[str]:
-    """Remove linhas 'no findings' dos achados finais."""
-    return [
-        a for a in achados
-        if "[INFO]" not in a and "No relevant" not in a and "(not triggered)" not in a
-    ]
-
-
-def _agrupar_por_severidade(achados: list[str]) -> dict[str, list[str]]:
-    buckets: dict[str, list[str]] = {px: [] for px in ("P0", "P1", "P2", "P3")}
-    for achado in achados:
-        for px in buckets:
-            if f"[{px}]" in achado:
-                buckets[px].append(achado)
-                break
-    return buckets
-
-
-def _formatar_lista_achados(items: list[str]) -> str:
-    return "\n".join(items) if items else "_(none)_"
-
-
-def _montar_recomendacoes(buckets: dict[str, list[str]]) -> str:
-    linhas: list[str] = []
-    if buckets["P0"]:
-        linhas.append(
-            "1. Fix all P0 blockers first — these cause guaranteed runtime failures."
-        )
-    if buckets["P1"]:
-        linhas.append(
-            "2. Address P1 high-severity regressions before merging."
-        )
-    if buckets["P2"]:
-        linhas.append(
-            "3. Resolve P2 typing/style issues to keep maintainability."
-        )
-    if buckets["P3"]:
-        linhas.append(
-            "4. P3 cosmetic items are optional but improve code quality."
-        )
-    if not linhas:
-        linhas.append("No actionable items — migration review passed.")
-    return "\n".join(linhas)
-
-
-def _montar_relatorio_markdown(state: CodeReviewState, exec_summary: str) -> str:
+def no_relatorio_final(state: CodeReviewState) -> dict:
     """
-    Monta seções 2–6 deterministicamente a partir do estado FINAL do grafo.
-    O LLM só preenche o Executive Summary (2–3 frases).
-    """
-    sem = _achados_relevantes(state.get("achados_semantica", []))
-    seg = _achados_relevantes(state.get("achados_seguranca", []))
-    lint = _achados_relevantes(state.get("achados_lint", []))
-    todos = sem + seg + lint
-    buckets = _agrupar_por_severidade(todos)
-
-    historico = state.get("historico_achados", [])
-    hist_str = json.dumps(historico, ensure_ascii=False, indent=2) if historico else "[]"
-    total_iters = state.get("iteracao", 1)
-    deve_reprocess = state.get("deve_reprocessar", False)
+    Consolida todos os achados validados em um relatório Markdown estruturado.
+    A IA NÃO corrige o código — apenas reporta e orienta.
 
     Quando `deve_reprocessar = True`, antecipa um cabeçalho de alerta indicando
     que o migration_agent deve ser acionado novamente.
@@ -807,6 +600,7 @@ def _montar_relatorio_markdown(state: CodeReviewState, exec_summary: str) -> str
     )
     response = llm.invoke(prompt)
 
+    conteudo = response.content
     if state.get("deve_reprocessar"):
         aviso = (
             "# ⚠️ AÇÃO REQUERIDA: Reprocessamento pelo Migration Agent\n\n"
@@ -938,4 +732,3 @@ async def review_code_files(
     original = (await codigo_original.read()).decode("utf-8")
     migrado  = (await codigo_migrado.read()).decode("utf-8")
     return _executar_grafo(original, migrado)
-    
