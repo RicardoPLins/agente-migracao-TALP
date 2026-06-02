@@ -14,7 +14,6 @@ sinaliza `deve_reprocessar = True` para que o migration_agent refaça a migraç�
 
 from __future__ import annotations
 
-import ast
 import json
 import os
 import re
