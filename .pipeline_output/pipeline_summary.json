@@ -1,13 +1,11 @@
 {
-  "pipeline_start": "2026-05-26T11:12:14.052543",
-  "total_elapsed_s": 60.0,
+  "pipeline_start": "2026-06-03T00:59:11.194063",
+  "total_elapsed_s": 427.6,
   "input_file": "/Users/ricardo/agente-migracao-TALP/url.py",
   "backend": {
-    "ollama_disponivel": false,
-    "ollama_model": null,
+    "ollama_disponivel": true,
+    "ollama_model": "qwen2.5:14b",
     "groq_usado_em": [
-      "migration",
-      "test",
       "review-leves"
     ],
     "gemini_usado_em": [
@@ -17,23 +15,24 @@
   "stages": {
     "migration": {
       "status": "validado",
-      "elapsed_s": 5.199571132659912,
-      "migrated_lines": 237,
-      "backend": "Groq (llama-3.1-8b-instant)"
+      "elapsed_s": 65.50925898551941,
+      "migrated_lines": 42,
+      "backend": "Ollama (qwen2.5:14b)"
     },
     "test": {
       "decision": "APPROVED",
       "iteration": 0,
-      "elapsed_s": 22.228880882263184,
+      "elapsed_s": 11.2815420627594,
       "error": null,
-      "backend": "Groq (llama-3.3-70b-versatile)"
+      "backend": "Ollama (qwen2.5:14b)"
     },
     "review": {
-      "deve_reprocessar": false,
-      "achados_total": 28,
-      "elapsed_s": 12.575612783432007,
+      "iteracoes_review_migration": 3,
+      "aprovado": false,
+      "achados_total": 6,
+      "elapsed_s": 4.69725489616394,
       "error": null,
-      "backend": "Gemini 2.5 Flash (pesados) + Groq 8B (leves)"
+      "backend": "Ollama (heavy=llama-3.3-70b-versatile, light=llama-3.3-70b-versatile)"
     }
   }
 }

@@ -167,43 +167,55 @@ D) requests errors:
 RULE #4 — WHAT TO TEST
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Good candidates:
-  - generateRequestData: pure method, no mocking.
-    original returns bytes (urlencode+encode), migrated returns dict.
-    Normalize for comparison.
-  - executeRequest: mock HTTP layer as shown above
-  - __init__ attribute checks
+READ THE CODE carefully and identify testable units:
 
-Bad candidates (skip):
-  - scrapeConversation: too many filesystem side effects
-  - main(): calls sys.exit
+A) If code has CLASSES with HTTP methods:
+   - Test each public method that makes HTTP calls (mock the network)
+   - Test __init__ attribute setup where parameters are stored
+   - Avoid methods with heavy filesystem/side effects
+
+B) If code has top-level FUNCTIONS that make HTTP calls:
+   - Test each function by mocking urllib.request.urlopen (original)
+     and requests.get/post/etc (migrated)
+
+C) If code is a SCRIPT (no classes/functions to import):
+   - Wrap testable logic in helper functions for testing
+   - Use patch to intercept HTTP calls at the module level
+
+D) For ALL cases:
+   - Test happy path: successful HTTP response → correct return value
+   - Test HTTP error: 4xx/5xx response → correct exception or return
+   - Test network error: connection failure → correct exception or return
+   - Test response parsing: assert returned data structure is correct
+   - NEVER test code that calls sys.exit() or writes to disk
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RULE #5 — CONSTRUCTOR DIFFERENCES
+RULE #5 — ADAPTING TO THE ACTUAL CODE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-The two classes WILL have different __init__ signatures.
-Read them carefully and instantiate each correctly.
+Read the code carefully before writing any test.
+- If classes exist, import and instantiate them correctly (read __init__ signatures)
+- If only functions exist, import and call them directly
+- If it's a script, mock at module level using patch
+- NEVER assume ConversationScraper or any specific class/function name
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RULE #6 — MANDATORY IMPORTS
+RULE #6 — IMPORTS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-import urllib.parse
-import urllib.error
-import urllib.request
-import gzip
-import io
-import json
-import responses
-import requests
-from unittest.mock import MagicMock, patch
-import pytest
-from original_module import ConversationScraper as OriginalConversationScraper
-from migrated_module import ConversationScraper as MigratedConversationScraper
+Always include:
+  import urllib.parse, urllib.error, urllib.request
+  import gzip, io, json, responses, requests
+  from unittest.mock import MagicMock, patch, Mock
+  import pytest
 
-CRITICAL: ALWAYS use OriginalConversationScraper and MigratedConversationScraper.
-NEVER use bare ConversationScraper.
+Import ONLY the classes/functions that actually exist in each module.
+Use aliases if both modules export the same name:
+  from original_module import MyClass as OrigMyClass
+  from migrated_module import MyClass as MigMyClass
+If the code has no importable classes/functions, import the modules directly:
+  import original_module
+  import migrated_module
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RULE #7 — OUTPUT FORMAT
@@ -275,6 +287,34 @@ EVALUATION:
 {final_evaluation}
 
 TIMESTAMP: {timestamp}
+""".strip()
+
+PROMPT_TEST_FIXER = """
+You are a test debugger. The generated pytest file produced failures. Analyze the failures
+and produce a CORRECTED version of the full pytest file.
+
+FAILURE ANALYSIS:
+{failure_analysis}
+
+ORIGINAL MODULE (urllib):
+{original_code}
+
+MIGRATED MODULE (requests):
+{migrated_code}
+
+CURRENT (BROKEN) TEST FILE:
+{test_code}
+
+MODULE QUIRKS:
+{module_quirks}
+
+Rules for fixing:
+1. If a test fails because of a wrong mock setup, fix the mock.
+2. If a test asserts the wrong value, fix the assertion.
+3. If a test imports a nonexistent name, fix the import.
+4. Do NOT remove tests — fix them.
+5. Keep all the mocking rules from the original prompt (no real HTTP, gzip handling, etc).
+6. Output ONLY valid Python code. No markdown, no explanation.
 """.strip()
 
 # ── Utils ─────────────────────────────────────────────────────────────────────
@@ -436,6 +476,8 @@ class AgentState(TypedDict):
     generation_error_reason: str
     router_decision:         dict
     report:                  str
+    iteration:               int    # número de tentativas de correção interna
+    fix_feedback:            str    # análise das falhas para o Generator re-tentar
 
 
 # ── Node 1: Analyzer ──────────────────────────────────────────────────────────
@@ -499,21 +541,36 @@ def node_inspector(state: AgentState) -> AgentState:
 # ── Node 3: Generator ────────────────────────────────────────────────────────
 
 def node_generator(state: AgentState) -> AgentState:
-    quirks = state.get("module_quirks", {})
+    quirks      = state.get("module_quirks", {})
+    fix_feedback = state.get("fix_feedback", "").strip()
+    iteration    = state.get("iteration", 0)
 
-    print("[Generator] Generating unit tests...")
-    prompt = (
-        PROMPT_GENERATOR
-        .replace("{original_code}", state["original_code"])
-        .replace("{migrated_code}", state["migrated_code"])
-        .replace("{test_plan}",     json.dumps(state["test_plan"], indent=2))
-        .replace("{module_quirks}", json.dumps(quirks, indent=2))
-    )
+    if fix_feedback:
+        # Modo correção: usa PROMPT_TEST_FIXER com o código quebrado atual
+        print(f"[Generator] Fixing tests (iteration {iteration})...")
+        prompt = (
+            PROMPT_TEST_FIXER
+            .replace("{failure_analysis}", fix_feedback)
+            .replace("{original_code}",   state["original_code"])
+            .replace("{migrated_code}",   state["migrated_code"])
+            .replace("{test_code}",       state.get("test_code", ""))
+            .replace("{module_quirks}",   json.dumps(quirks, indent=2))
+        )
+    else:
+        print("[Generator] Generating unit tests...")
+        prompt = (
+            PROMPT_GENERATOR
+            .replace("{original_code}", state["original_code"])
+            .replace("{migrated_code}", state["migrated_code"])
+            .replace("{test_plan}",     json.dumps(state["test_plan"], indent=2))
+            .replace("{module_quirks}", json.dumps(quirks, indent=2))
+        )
+
     test_code = ""
     error = False
     reason = ""
     last_error = ""
-    
+
     for attempt in range(1, LLM_RETRY_ATTEMPTS + 1):
         retry_prompt = prompt if not last_error else (
             prompt + f"\n\n# PREVIOUS ATTEMPT FAILED\n# Error: {last_error}\n"
@@ -523,7 +580,7 @@ def node_generator(state: AgentState) -> AgentState:
         valid, msg = _validate_test_code(raw, quirks)
         if valid:
             test_code = raw
-            print(f"[Generator] Valid unit tests on attempt {attempt}")
+            print(f"[Generator] Valid tests on attempt {attempt}")
             try:
                 out_dir = Path(__file__).parent / "generated_tests"
                 out_dir.mkdir(parents=True, exist_ok=True)
@@ -536,10 +593,10 @@ def node_generator(state: AgentState) -> AgentState:
         last_error = msg
         print(f"  [Generator] Attempt {attempt} invalid: {msg}")
         reason = msg
-    
+
     if not test_code:
         error = True
-        print(f"[Generator] WARNING: unit tests failed after {LLM_RETRY_ATTEMPTS} attempts — {reason}")
+        print(f"[Generator] WARNING: tests failed after {LLM_RETRY_ATTEMPTS} attempts — {reason}")
 
     return {**state, "test_code": test_code,
             "generation_error": error, "generation_error_reason": reason}
@@ -696,6 +753,66 @@ def node_evaluator(state: AgentState) -> AgentState:
     return {**state, "evaluation": evaluation, "regressions": regressions}
 
 
+# ── Node 5b: TestFixer ───────────────────────────────────────────────────────
+
+MAX_FIX_ATTEMPTS = 2   # tentativas internas de corrigir testes antes de ir ao Router
+
+def node_test_fixer(state: AgentState) -> AgentState:
+    """
+    Analisa as falhas de execução e monta feedback para o Generator re-tentar.
+    Incrementa o contador de iterações para evitar loop infinito.
+    """
+    ev          = state.get("evaluation", {})
+    regressions = ev.get("regressions_detected", [])
+    symmetric   = ev.get("symmetric_failures", [])
+    inversions  = ev.get("inversions_detected", [])
+    gen_error   = state.get("generation_error_reason", "")
+
+    parts = []
+    if regressions:
+        parts.append(
+            f"REGRESSIONS — tests that pass on original but FAIL on migrated "
+            f"(migration broke behavior): {regressions}"
+        )
+    if symmetric:
+        parts.append(
+            f"SYMMETRIC FAILURES — fail on both modules (test is broken, not migration): "
+            f"{symmetric}"
+        )
+    if inversions:
+        parts.append(
+            f"INVERSIONS — fail on original but pass on migrated "
+            f"(possible behavior change): {inversions}"
+        )
+    if gen_error:
+        parts.append(f"GENERATION ERROR: {gen_error}")
+
+    feedback = "\n".join(parts) if parts else "Tests produced no passing baseline — check imports and mocking."
+    iteration = state.get("iteration", 0) + 1
+
+    print(f"[TestFixer] Iteration {iteration}/{MAX_FIX_ATTEMPTS} — regressions={len(regressions)} "
+          f"symmetric={len(symmetric)}")
+
+    return {**state, "fix_feedback": feedback, "iteration": iteration}
+
+
+def _should_fix_or_route(state: AgentState) -> str:
+    """Após Evaluator: tenta corrigir testes se ainda há tentativas restantes."""
+    ev        = state.get("evaluation", {})
+    status    = ev.get("status", "PASS")
+    unreliable = ev.get("unreliable_results", False)
+    iteration = state.get("iteration", 0)
+
+    has_regressions = len(ev.get("regressions_detected", [])) > 0
+    has_symmetric   = len(ev.get("symmetric_failures", [])) > 0
+    gen_error       = state.get("generation_error", False)
+
+    # Corrige só se: falhou com regressões OU testes quebrados E ainda tem tentativas
+    if (has_regressions or has_symmetric or gen_error) and not unreliable and iteration < MAX_FIX_ATTEMPTS:
+        return "fixer"
+    return "router"
+
+
 # ── Node 6: Router ───────────────────────────────────────────────────────────
 
 def node_router(state: AgentState) -> AgentState:
@@ -792,24 +909,33 @@ def node_report(state: AgentState) -> AgentState:
 
 def build_graph():
     from langgraph.graph import END, StateGraph
-    
+
     g = StateGraph(AgentState)
     for name, fn in [("analyzer",  node_analyzer),
                      ("inspector", node_inspector),
                      ("generator", node_generator),
                      ("executor",  node_executor),
                      ("evaluator", node_evaluator),
+                     ("fixer",     node_test_fixer),
                      ("router",    node_router),
                      ("report",    node_report)]:
         g.add_node(name, fn)
+
     g.set_entry_point("analyzer")
     g.add_edge("analyzer",  "inspector")
     g.add_edge("inspector", "generator")
     g.add_edge("generator", "executor")
     g.add_edge("executor",  "evaluator")
-    g.add_edge("evaluator", "router")
-    g.add_edge("router",    "report")
-    g.add_edge("report",    END)
+    # Após Evaluator: tenta corrigir testes se houver falhas e ainda há tentativas
+    g.add_conditional_edges(
+        "evaluator",
+        _should_fix_or_route,
+        {"fixer": "fixer", "router": "router"},
+    )
+    # Fixer → Generator (re-gera testes com feedback) → Executor → Evaluator
+    g.add_edge("fixer",  "generator")
+    g.add_edge("router", "report")
+    g.add_edge("report", END)
     return g.compile()
 
 
@@ -830,6 +956,8 @@ def run_agent(original_code: str, migrated_code: str) -> dict:
         "generation_error_reason": "",
         "router_decision":         {},
         "report":                  "",
+        "iteration":               0,
+        "fix_feedback":            "",
     })
 
 

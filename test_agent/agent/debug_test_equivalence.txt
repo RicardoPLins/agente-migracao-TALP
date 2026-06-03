@@ -3,16 +3,54 @@ collecting ... collected 0 items / 1 error
 
 ==================================== ERRORS ====================================
 _____________________ ERROR collecting test_equivalence.py _____________________
-ImportError while importing test module '/private/var/folders/qd/vpldsh2506q3p2xlqbm_pc3r0000gn/T/tmpfamt04m4/test_equivalence.py'.
-Hint: make sure your test modules/packages have valid Python names.
-Traceback:
-/opt/homebrew/Cellar/python@3.14/3.14.5/Frameworks/Python.framework/Versions/3.14/lib/python3.14/importlib/__init__.py:88: in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-test_equivalence.py:7: in <module>
-    from original_module import ConversationScraper as OriginalConversationScraper
-E   ImportError: cannot import name 'ConversationScraper' from 'original_module' (/private/var/folders/qd/vpldsh2506q3p2xlqbm_pc3r0000gn/T/tmpfamt04m4/original_module.py)
+
+    import pytest
+    import urllib.parse
+    import urllib.error
+    import urllib.request
+    import gzip
+    import io
+    import json
+    import responses
+    import requests
+    from unittest.mock import MagicMock, patch, Mock
+    
+>   from original_module import _update as orig_update, _check as orig_check
+
+test_equivalence.py:12: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+>   URLLIB
+E   NameError: name 'URLLIB' is not defined
+
+original_module.py:1: NameError
+=============================== warnings summary ===============================
+original_module.py:15
+  /private/var/folders/qd/vpldsh2506q3p2xlqbm_pc3r0000gn/T/tmpss6llt57/original_module.py:15: SyntaxWarning: "is" with 'int' literal. Did you mean "=="?
+    if version() is 2:
+
+original_module.py:17
+  /private/var/folders/qd/vpldsh2506q3p2xlqbm_pc3r0000gn/T/tmpss6llt57/original_module.py:17: SyntaxWarning: "is" with 'int' literal. Did you mean "=="?
+    if version() is 3:
+
+original_module.py:21
+  /private/var/folders/qd/vpldsh2506q3p2xlqbm_pc3r0000gn/T/tmpss6llt57/original_module.py:21: SyntaxWarning: "is" with 'int' literal. Did you mean "=="?
+    if version() is 3:
+
+original_module.py:35
+  /private/var/folders/qd/vpldsh2506q3p2xlqbm_pc3r0000gn/T/tmpss6llt57/original_module.py:35: SyntaxWarning: "is" with 'int' literal. Did you mean "=="?
+    if version() is 2:
+
+original_module.py:37
+  /private/var/folders/qd/vpldsh2506q3p2xlqbm_pc3r0000gn/T/tmpss6llt57/original_module.py:37: SyntaxWarning: "is" with 'int' literal. Did you mean "=="?
+    if version() is 3:
+
+original_module.py:41
+  /private/var/folders/qd/vpldsh2506q3p2xlqbm_pc3r0000gn/T/tmpss6llt57/original_module.py:41: SyntaxWarning: "is" with 'int' literal. Did you mean "=="?
+    if version() is 3:
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
 =========================== short test summary info ============================
-ERROR test_equivalence.py
+ERROR test_equivalence.py - NameError: name 'URLLIB' is not defined
 !!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
-=============================== 1 error in 0.16s ===============================
+========================= 6 warnings, 1 error in 0.08s =========================

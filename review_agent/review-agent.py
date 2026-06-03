@@ -601,16 +601,37 @@ def no_relatorio_final(state: CodeReviewState) -> dict:
     response = llm.invoke(prompt)
 
     conteudo = response.content
-    if state.get("deve_reprocessar"):
-        aviso = (
-            "# ⚠️ AÇÃO REQUERIDA: Reprocessamento pelo Migration Agent\n\n"
-            "> O no_critico avaliou **3 iterações** de refinamento e ainda identificou "
-            "problemas críticos. A migração deve ser refeita pelo **migration_agent** "
-            "antes de uma nova revisão.\n\n---\n\n"
-        )
+
+    # Detecção determinística de achados P1: qualquer achado [P1] força reprocessamento.
+    todos_achados = (
+        state.get("achados_semantica", [])
+        + state.get("achados_seguranca", [])
+        + state.get("achados_lint", [])
+    )
+    tem_p1 = any("[P1]" in achado for achado in todos_achados)
+    deve_reprocessar = state.get("deve_reprocessar") or tem_p1
+
+    if deve_reprocessar:
+        if tem_p1:
+            achados_p1 = [a for a in todos_achados if "[P1]" in a]
+            lista_p1 = "\n".join(f"> {a}" for a in achados_p1)
+            aviso = (
+                "# ⚠️ AÇÃO REQUERIDA: Reprocessamento pelo Migration Agent\n\n"
+                "> Foram encontrados achados **[P1]** (críticos) que impedem a aprovação "
+                "desta migração. O **migration_agent** deve corrigir os problemas abaixo "
+                "antes de uma nova revisão.\n\n"
+                f"**Achados P1 identificados:**\n{lista_p1}\n\n---\n\n"
+            )
+        else:
+            aviso = (
+                "# ⚠️ AÇÃO REQUERIDA: Reprocessamento pelo Migration Agent\n\n"
+                "> O no_critico avaliou **3 iterações** de refinamento e ainda identificou "
+                "problemas críticos. A migração deve ser refeita pelo **migration_agent** "
+                "antes de uma nova revisão.\n\n---\n\n"
+            )
         conteudo = aviso + conteudo
 
-    return {"relatorio_final": conteudo}
+    return {"relatorio_final": conteudo, "deve_reprocessar": deve_reprocessar}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

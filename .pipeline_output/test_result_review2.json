@@ -1,0 +1,51 @@
+{
+  "evaluation": {
+    "execution_summary": {
+      "original_passed": 0,
+      "original_failed": 0,
+      "migrated_passed": 0,
+      "migrated_failed": 0,
+      "valid_baseline": 0,
+      "confirmed_equivalent": 0,
+      "regressions": 0,
+      "inversions": 0,
+      "symmetric_failures": 0,
+      "regression_rate": 0.0,
+      "equivalence_rate": 0.0
+    },
+    "coverage": {
+      "original": 0.0,
+      "migrated": 0.0
+    },
+    "coverage_note": "Coverage measures code execution, not behavioral equivalence. Two implementations can have identical coverage with different outputs.",
+    "regressions_detected": [],
+    "inversions_detected": [],
+    "symmetric_failures": [],
+    "confirmed_equivalent": [],
+    "scores": {
+      "overall": 0.0
+    },
+    "status": "FAIL",
+    "unreliable_results": true
+  },
+  "router_decision": {
+    "needs_revision": false,
+    "reasons": [
+      "Baseline too low (0 < 3) — result is inconclusive"
+    ],
+    "suggestions": [
+      "Fix test generation quality before re-evaluating the migration."
+    ],
+    "regressions": 0,
+    "inversions": 0,
+    "equivalence_rate": 0.0,
+    "valid_baseline": 0,
+    "evaluator_status": "FAIL",
+    "regressions_detected": [],
+    "inversions_detected": []
+  },
+  "decision": "APPROVED",
+  "iteration": 0,
+  "elapsed_s": 12.019877195358276,
+  "backend": "Ollama (qwen2.5:14b)"
+}
