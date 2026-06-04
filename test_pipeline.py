@@ -23,6 +23,7 @@ Variáveis de ambiente:
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import sys
 import time
@@ -231,37 +232,37 @@ else:
 
 # ── Importação dinâmica dos agentes ───────────────────────────────────────────
 
-def _import_migration_agent():
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "langgraph_mig03", MIGRATION_DIR / "langgraph-mig03.py"
-    )
+def _carregar_modulo(nome: str, caminho: Path):
+    spec = importlib.util.spec_from_file_location(nome, caminho)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Não foi possível carregar o módulo {nome} em {caminho}")
+
     mod = importlib.util.module_from_spec(spec)
-    mod.__name__ = "langgraph_mig03"
     spec.loader.exec_module(mod)
     return mod
+
+
+def _import_migration_agent():
+    return _carregar_modulo(
+        "langgraph_mig03",
+        MIGRATION_DIR / "langgraph-mig03.py",
+    )
 
 
 def _import_test_agent():
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "test_agent_agent", TEST_AGENT_DIR / "agent" / "agent.py"
+    return _carregar_modulo(
+        "test_agent_agent",
+        TEST_AGENT_DIR / "agent" / "agent.py",
     )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 def _import_review_agent():
-    import importlib.util
     # Garante re-detecção de modelos Ollama quando env vars REVIEW_* foram definidas
     sys.modules.pop("review_agent", None)
-    spec = importlib.util.spec_from_file_location(
-        "review_agent", REVIEW_AGENT_DIR / "review-agent.py"
+    return _carregar_modulo(
+        "review_agent",
+        REVIEW_AGENT_DIR / "review-agent.py",
     )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 # ── Funções de execução de cada etapa ─────────────────────────────────────────

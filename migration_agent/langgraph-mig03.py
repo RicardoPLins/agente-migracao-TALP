@@ -547,7 +547,31 @@ def criar_agente_migracao(exemplos_treino: list[dict], prompt_sistema: str):
 # =============================================================================
 # MAIN EXECUTION
 # =============================================================================
+def preparar_contexto_migracao(num_exemplos: int = 10) -> tuple[list[dict], str]:
+    """Carrega exemplos few-shot + prompt-sistema UMA vez (reutilizado no loop)."""
+    exemplos = carregar_exemplos_treino(num_exemplos)
+    prompt_sistema = criar_prompt_treino(exemplos)
+    return exemplos, prompt_sistema
 
+
+def migrar_codigo(codigo_usuario, exemplos_treino, prompt_sistema) -> str:
+    """Migração inicial urllib→requests."""
+    resultado = no_migrar_com_llm(
+        {"codigo_usuario": codigo_usuario, "codigo_migrado": "",
+         "feedback_revisao": "", "status": ""},
+        exemplos_treino, prompt_sistema)
+    return resultado.get("codigo_migrado", "") or ""
+
+
+def aplicar_feedback_revisao(codigo_usuario, codigo_migrado, feedback,
+                             exemplos_treino, prompt_sistema) -> str:
+    """Refino incremental: aplica o relatório do review ao código migrado."""
+    resultado = no_refinar_com_feedback(
+        {"codigo_usuario": codigo_usuario, "codigo_migrado": codigo_migrado,
+         "feedback_revisao": feedback, "status": "migrado"},
+        exemplos_treino, prompt_sistema)
+    return resultado.get("codigo_migrado", codigo_migrado) or codigo_migrado
+    
 if __name__ == "__main__":
     print("=" * 80)
     print("🤖 AGENTE DE MIGRAÇÃO COM IA - urllib → requests")
