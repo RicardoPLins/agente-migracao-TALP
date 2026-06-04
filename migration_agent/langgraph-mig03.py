@@ -81,10 +81,10 @@ def _criar_modelo_migracao():
 
     return (
         ChatGroq(
-            model="qwen2.5:14b",
+            model="llama-3.3-70b-versatile",
             temperature=0.0,
         ),
-        "Groq (qwen2.5:14b)",
+        "Groq (llama-3.3-70b-versatile)",
     )
 
 # =============================================================================
@@ -133,6 +133,22 @@ def carregar_exemplos_treino(num_exemplos: int = 20) -> list[dict]:
     except Exception as e:
         print(f"❌ Error loading dataset: {e}")
         return []
+
+
+_PROMPT_REFINAMENTO = """You are a Python code refinement specialist.
+
+Your ONLY job is to fix the specific issues listed in the feedback below.
+Do NOT re-migrate the code from scratch.
+Do NOT rewrite code that has no reported issues.
+Apply the minimum changes needed to resolve each reported problem.
+
+Key migration rules to keep in mind while fixing:
+1. Keep all `import requests` statements present.
+2. Keep all `response.raise_for_status()` calls unless the feedback explicitly says to remove them.
+3. Keep all timeout parameters.
+4. Keep all session/cookie handling.
+5. Never reintroduce urllib imports.
+""".strip()
 
 
 def criar_prompt_treino(exemplos: list[dict]) -> str:
@@ -342,23 +358,23 @@ def no_refinar_com_feedback(estado: EstadoAgente, exemplos_treino: list[dict], p
         model, backend_label = _criar_modelo_migracao()
 
         messages = [
-            SystemMessage(content=prompt_sistema),
-            HumanMessage(content=f"""Refine the existing urllib → requests migration using the review agent feedback.
+            SystemMessage(content=_PROMPT_REFINAMENTO),
+            HumanMessage(content=f"""Fix the issues listed in the feedback below.
 
-Original urllib code:
-```python
-{codigo_usuario}
-```
-
-Current migrated code:
+## Current migrated code (already uses requests — do NOT start over):
 ```python
 {codigo_migrado_atual}
 ```
 
-Review feedback:
+## Original urllib code (for reference only):
+```python
+{codigo_usuario}
+```
+
+## Feedback — fix ONLY these issues:
 {feedback_revisao}
 
-Return ONLY the improved Python code without any explanation or markdown.""")
+Return ONLY the corrected Python code without any explanation or markdown.""")
         ]
 
         response = model.invoke(messages)
@@ -458,6 +474,9 @@ def decidir_proxima_etapa(estado: EstadoAgente) -> Literal["inferir", "migrar", 
     if status == "no_urllib":
         return "fim"
     elif status == "codigo_recebido":
+        # Se já há código migrado + feedback do review, vai direto para refinamento
+        if estado.get("feedback_revisao", "").strip() and estado.get("codigo_migrado", "").strip():
+            return "refinar"
         return "migrar"
     elif status == "migrado":
         if estado.get("feedback_revisao", "").strip():
@@ -498,8 +517,9 @@ def criar_agente_migracao(exemplos_treino: list[dict], prompt_sistema: str):
         "receber",
         decidir_proxima_etapa,
         {
-            "migrar": "migrar",
-            "fim": END
+            "migrar":  "migrar",
+            "refinar": "refinar",
+            "fim":     END
         }
     )
     grafo.add_conditional_edges(

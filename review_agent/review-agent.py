@@ -1711,13 +1711,17 @@ def no_relatorio_final(state: CodeReviewState) -> dict:
         "### Segurança:", *(seg_fmt or ["(nenhum)"]), "",
         "### Lint:", *(lint_fmt or ["(nenhum)"]),
     ])
-    veredito = _veredito(bool(state.get("deve_reprocessar")), _contar_severidades(todos))
+    counts = _contar_severidades(todos)
+    tem_bloqueador = counts.get("P0", 0) > 0 or counts.get("P1", 0) > 0
+    deve_reprocessar = bool(state.get("deve_reprocessar")) or tem_bloqueador
+    state_relatorio = {**state, "deve_reprocessar": deve_reprocessar}
+    veredito = _veredito(deve_reprocessar, counts)
 
     resumo = _gerar_resumo_executivo_llm(
-        llm, achados_resumo, bool(state.get("deve_reprocessar")), veredito
+        llm, achados_resumo, deve_reprocessar, veredito
     )
     relatorio = _gerar_relatorio_markdown(
-        state, resumo, todos, sem_fmt, seg_fmt, lint_fmt
+        state_relatorio, resumo, todos, sem_fmt, seg_fmt, lint_fmt
     )
 
     return {
@@ -1725,8 +1729,8 @@ def no_relatorio_final(state: CodeReviewState) -> dict:
         "achados_semantica": sem_fmt,
         "achados_seguranca": seg_fmt,
         "achados_lint": lint_fmt,
+        "deve_reprocessar": deve_reprocessar,
     }
-
 
 
 # ─────────────────────────────────────────────────────────────────────────────
