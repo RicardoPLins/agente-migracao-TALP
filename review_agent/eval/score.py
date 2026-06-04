@@ -7,17 +7,24 @@ Uso isolado — não depende do pipeline migration/test.
 from __future__ import annotations
 
 import json
+import logging
 import math
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 _SEV_RANK = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+logger = logging.getLogger(__name__)
 
 
 def load_gold(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
-    tasks = {t["id"]: t for t in data.get("tasks", [])}
+    task_list = data.get("tasks", [])
+    ids = [t["id"] for t in task_list if isinstance(t, dict) and "id" in t]
+    duplicados = sorted(task_id for task_id, count in Counter(ids).items() if count > 1)
+    if duplicados:
+        raise ValueError(f"IDs de task duplicados no gold {path}: {duplicados}")
+    tasks = {t["id"]: t for t in task_list}
     return {"version": data.get("version", "?"), "tasks": tasks}
 
 
@@ -70,14 +77,32 @@ def _match_preexistente(achado: dict[str, Any], item: dict[str, Any]) -> bool:
     return _match_keywords(_texto_achado(achado), item.get("keywords") or [])
 
 
-def infer_veredito(result: dict[str, Any]) -> str:
-    if result.get("deve_reprocessar"):
-        return "REPROCESSAR"
-    achados = result.get("achados_estruturados") or []
+VereditoFn = Callable[[bool, Counter[str]], str]
+
+
+def infer_veredito(
+    result: dict[str, Any],
+    achados: list[dict[str, Any]],
+    veredito_fn: VereditoFn | None = None,
+) -> str:
+    veredito_payload = result.get("veredito")
+    if isinstance(veredito_payload, str) and veredito_payload:
+        return veredito_payload
+
     counts: Counter[str] = Counter()
     for a in achados:
         if a.get("prefixo") and a.get("severidade"):
             counts[a["severidade"]] += 1
+
+    if veredito_fn is not None:
+        return veredito_fn(bool(result.get("deve_reprocessar")), counts)
+
+    logger.warning(
+        "Payload sem veredito e sem função canônica do produto; "
+        "usando fallback legado de inferência no eval."
+    )
+    if result.get("deve_reprocessar"):
+        return "REPROCESSAR"
     if counts.get("P0", 0) > 0:
         return "REPROVADO"
     if counts.get("P1", 0) > 0:
@@ -85,8 +110,39 @@ def infer_veredito(result: dict[str, Any]) -> str:
     return "APROVADO"
 
 
-def score_task(result: dict[str, Any], gold_task: dict[str, Any]) -> dict[str, Any]:
-    achados = result.get("achados_estruturados") or []
+def _achados_para_score(result: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+    warnings: list[str] = []
+    if "achados_estruturados" not in result:
+        msg = (
+            "Run sem 'achados_estruturados' — schema antigo ou payload inválido; "
+            "score não confiável."
+        )
+        logger.warning(msg)
+        warnings.append(msg)
+        return [], warnings
+
+    achados = result.get("achados_estruturados")
+    if achados is None:
+        return [], warnings
+    if not isinstance(achados, list):
+        msg = (
+            "'achados_estruturados' não é uma lista — schema inválido; "
+            "score não confiável."
+        )
+        logger.warning(msg)
+        warnings.append(msg)
+        return [], warnings
+
+    return [a for a in achados if isinstance(a, dict)], warnings
+
+
+def score_task(
+    result: dict[str, Any],
+    gold_task: dict[str, Any],
+    veredito_fn: VereditoFn | None = None,
+) -> dict[str, Any]:
+    achados, schema_warnings = _achados_para_score(result)
+    schema_valido = not schema_warnings
     regressoes = gold_task.get("regressoes") or []
     preexistentes = gold_task.get("preexistentes") or []
 
@@ -106,11 +162,11 @@ def score_task(result: dict[str, Any], gold_task: dict[str, Any]) -> dict[str, A
         if any(_match_preexistente(a, pre) for pre in preexistentes):
             falsos_p1 += 1
 
-    veredito = infer_veredito(result)
+    veredito = infer_veredito(result, achados, veredito_fn)
     esperado = gold_task.get("veredito_esperado", "APROVADO")
     veredito_ok = veredito == esperado
 
-    strict_pass = recall_r >= 1.0 and falsos_p1 == 0 and veredito_ok
+    strict_pass = schema_valido and recall_r >= 1.0 and falsos_p1 == 0 and veredito_ok
 
     agentes = result.get("agentes_acionados") or []
     cobertura_3 = set(agentes) >= {"semantica", "seguranca", "lint"}
@@ -125,6 +181,8 @@ def score_task(result: dict[str, Any], gold_task: dict[str, Any]) -> dict[str, A
         "veredito_esperado": esperado,
         "veredito_ok": veredito_ok,
         "strict_pass": strict_pass,
+        "schema_valido": schema_valido,
+        "schema_warnings": schema_warnings,
         "agentes_acionados": agentes,
         "cobertura_3_agentes": cobertura_3,
         "total_achados": len(achados),
@@ -155,6 +213,7 @@ def aggregate_task_runs(scores: list[dict[str, Any]]) -> dict[str, Any]:
         return {}
     n = len(scores)
     strict = sum(1 for s in scores if s["strict_pass"])
+    schema_invalid = sum(1 for s in scores if not s.get("schema_valido", True))
     recall_avg = sum(s["recall_R"] for s in scores) / n
     rj = [1.0 if s["strict_pass"] else 0.0 for s in scores]
     r_mean = sum(rj) / n
@@ -162,6 +221,7 @@ def aggregate_task_runs(scores: list[dict[str, Any]]) -> dict[str, Any]:
 
     out: dict[str, Any] = {
         "runs": n,
+        "schema_invalid_count": schema_invalid,
         "strict_pass_count": strict,
         "strict_pass_rate": round(strict / n, 4),
         "recall_R_mean": round(recall_avg, 4),
@@ -185,9 +245,10 @@ def format_report(
         "",
         "## Por run",
     ]
-    for i, s in enumerate(per_run):
+    for s in per_run:
         lines.append(
-            f"- run {i}: StrictPass={s['strict_pass']} Recall@R={s['recall_R']} "
+            f"- run {s.get('run_id', '?')}: "
+            f"StrictPass={s['strict_pass']} Recall@R={s['recall_R']} "
             f"veredito={s['veredito']} (esp. {s['veredito_esperado']}) "
             f"falsos_P1={s['falsos_p1_preexistente']} agentes={s['agentes_acionados']}"
         )
@@ -195,6 +256,8 @@ def format_report(
             miss = set(s["regressoes_esperadas"]) - set(s["regressoes_detectadas"])
             if miss:
                 lines.append(f"  - regressões não detectadas: {sorted(miss)}")
+        for warning in s.get("schema_warnings", []):
+            lines.append(f"  - aviso de schema: {warning}")
     lines.extend(["", "## Agregado", ""])
     for k, v in agg.items():
         lines.append(f"- **{k}**: {v}")

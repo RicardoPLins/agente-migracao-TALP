@@ -6,6 +6,7 @@
 ## Agregado
 
 - **runs**: 1
+- **schema_invalid_count**: 0
 - **strict_pass_count**: 1
 - **strict_pass_rate**: 1.0
 - **recall_R_mean**: 1.0
