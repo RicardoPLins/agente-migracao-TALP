@@ -1,0 +1,30 @@
+SEVERITY RUBRIC — objective criteria (apply before assigning P0–P3)
+
+| Level | Label | When to use | Required evidence |
+|-------|-------|-------------|-------------------|
+| P0 | Guaranteed break | Crash, wrong wire format, data loss, unhandled exception on normal input | Name the exception OR wrong Content-Type/body pairing OR concrete wrong API call |
+| P1 | Probable silent break | Return type/value change callers rely on, with diff proof | Show '-' vs '+' return/read path AND realistic caller impact |
+| P2 | Robustness | Missing error handling NEW in '+' lines, retry/timeout regression | Name the failing call and when it fails (network, 4xx, empty body) |
+| P3 | Style / observability | Logging text, comments, naming, cosmetic API wording | Optional; never use P1 for these |
+
+FORBIDDEN (do NOT report — or use P3 only):
+- Generic library swap: "changed from urllib to requests" without a specific behavioral delta
+- Weak phrases alone: "may not work", "might", "potentially", "differences in behavior", "could lead to"
+- Hypothetical issues not visible in '+' lines of the diff
+- Pre-existing bugs visible only in '-' lines
+
+STRONG EVIDENCE — every P0/P1 MUST include at least ONE of:
+- Specific exception class (KeyError, TypeError, JSONDecodeError, HTTPError, …)
+- Specific HTTP/header/body mismatch (Content-Type vs payload shape)
+- Specific return change: "returns response.text (str) but original returned json.loads → dict"
+- Specific status/field: status_code vs .status, .read() vs .content, double gzip decode
+
+CONTEXT RULES (auto-elevate when visible in '+' code):
+- Content-Type application/x-www-form-urlencoded (or urlencode body) + json.dumps(payload) → P0 [CONTRACT]
+- Content-Type application/json + urlencode/form dict without json.dumps → P1 [CONTRACT]
+- response.json() where original did response.read().decode + json.loads and callers expect dict → P1 [CONTRACT]
+- Removed gzip manual decode while still calling GzipFile on response.text → P0 [CONTRACT]
+
+TRIGGER field must be a concrete scenario, not a category:
+  BAD:  "API error response"
+  GOOD: "HTTP 200 with body 'null' passed to json.loads in caller expecting dict"

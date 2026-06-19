@@ -23,6 +23,7 @@ Variáveis de ambiente:
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import sys
 import time
@@ -51,13 +52,18 @@ OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
 # Ordem de preferência de modelos Ollama para migration + test
 _OLLAMA_MODEL_PREFS = [
+    "qwen2.5:14b", "qwen2.5-coder:14b",
     "llama3.1", "llama3.1:latest",
     "llama3.2", "llama3.2:latest",
     "llama3",   "llama3:latest",
     "llama3.3", "llama3.3:latest",
 ]
 
-# ChatOllama defaults usados pelo migration_agent
+# Modelos preferidos para o review_agent (semântico → heavy)
+_REVIEW_OLLAMA_HEAVY_DEFAULT = "llama-3.3-70b-versatile"
+_REVIEW_OLLAMA_LIGHT_DEFAULT = "llama-3.3-70b-versatile"
+
+# ChatOllama defaults usados por migration/test — review_agent passa modelos tier explícitos
 _OLLAMA_GENERIC_DEFAULTS = frozenset({"llama3", "llama3:latest", ""})
 
 
@@ -226,45 +232,55 @@ else:
 
 # ── Importação dinâmica dos agentes ───────────────────────────────────────────
 
-def _import_migration_agent():
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "langgraph_mig03", MIGRATION_DIR / "langgraph-mig03.py"
-    )
+def _carregar_modulo(nome: str, caminho: Path):
+    spec = importlib.util.spec_from_file_location(nome, caminho)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Não foi possível carregar o módulo {nome} em {caminho}")
+
     mod = importlib.util.module_from_spec(spec)
-    mod.__name__ = "langgraph_mig03"
     spec.loader.exec_module(mod)
     return mod
+
+
+def _import_migration_agent():
+    return _carregar_modulo(
+        "langgraph_mig03",
+        MIGRATION_DIR / "langgraph-mig03.py",
+    )
 
 
 def _import_test_agent():
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "test_agent_agent", TEST_AGENT_DIR / "agent" / "agent.py"
+    return _carregar_modulo(
+        "test_agent_agent",
+        TEST_AGENT_DIR / "agent" / "agent.py",
     )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 def _import_review_agent():
-    import importlib.util
     # Garante re-detecção de modelos Ollama quando env vars REVIEW_* foram definidas
     sys.modules.pop("review_agent", None)
-    spec = importlib.util.spec_from_file_location(
-        "review_agent", REVIEW_AGENT_DIR / "review-agent.py"
+    return _carregar_modulo(
+        "review_agent",
+        REVIEW_AGENT_DIR / "review-agent.py",
     )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 # ── Funções de execução de cada etapa ─────────────────────────────────────────
 
-def run_migration(codigo_original: str, num_examples: int = 30) -> dict:
-    """Executa o migration_agent. Retorna: migrated_code, status, messages."""
+def run_migration(
+    codigo_original: str,
+    num_examples: int = 10,
+    feedback_revisao: str = "",
+    codigo_migrado_atual: str = "",
+) -> dict:
+    """
+    Executa o migration_agent.
+    Quando feedback_revisao + codigo_migrado_atual são fornecidos, o agente vai
+    direto ao nó 'refinar' sem re-migrar do zero.
+    """
     print(f"\n{'='*60}")
-    print("  ETAPA 1 — MIGRATION AGENT")
+    label = " (com feedback de teste)" if feedback_revisao else ""
+    print(f"  ETAPA 1 — MIGRATION AGENT{label}")
     backend = f"Ollama ({OLLAMA_MODEL})" if OLLAMA_DISPONIVEL else "Groq (llama-3.1-8b-instant)"
     print(f"  Backend : {backend}")
     print(f"{'='*60}")
@@ -272,24 +288,33 @@ def run_migration(codigo_original: str, num_examples: int = 30) -> dict:
 
     mig = _import_migration_agent()
 
-    print(f"  Carregando {num_examples} exemplos do dataset...")
-    exemplos = mig.carregar_exemplos_treino(num_examples)
-    if not exemplos:
-        print("  AVISO: nenhum exemplo carregado — usando prompt base sem few-shot.")
+    if feedback_revisao:
+        # Modo refinamento: não precisa de exemplos — o nó refinar usa prompt dedicado
+        print("  Modo refinamento — pulando carregamento do dataset.")
         exemplos = []
+    else:
+        print(f"  Carregando {num_examples} exemplos do dataset...")
+        exemplos = mig.carregar_exemplos_treino(num_examples)
+        if not exemplos:
+            print("  AVISO: nenhum exemplo carregado — usando prompt base sem few-shot.")
 
     prompt_sistema = mig.criar_prompt_treino(exemplos)
     agente = mig.criar_agente_migracao(exemplos, prompt_sistema)
 
     from langchain_core.messages import HumanMessage, AIMessage
 
+    msg_content = (
+        "Refinar migração urllib→requests com feedback do test agent"
+        if feedback_revisao else
+        "Migrar código urllib para requests"
+    )
+
     resultado = agente.invoke({
-        "messages":            [HumanMessage(content="Migrar código urllib para requests")],
-        "codigo_usuario":      codigo_original,
-        "codigo_migrado":      "",
-        "inferencia_semantica": "",
-        "analise_agente":      "",
-        "status":              "",
+        "messages":        [HumanMessage(content=msg_content)],
+        "codigo_usuario":  codigo_original,
+        "codigo_migrado":  codigo_migrado_atual,
+        "feedback_revisao": feedback_revisao,
+        "status":          "",
     })
 
     elapsed        = time.time() - t0
@@ -415,7 +440,85 @@ def run_review(original_code: str, migrated_code: str, max_retries: int = 3) -> 
 
 # ── Pipeline principal ─────────────────────────────────────────────────────────
 
-MAX_REVISION_LOOPS = 3   # evita loop infinito
+MAX_REVISION_LOOPS = 3   # evita loop infinito no test_agent
+MAX_REVIEW_LOOPS   = 3   # máximo de iterações review → migration
+
+
+def _formatar_feedback_teste(test_result: dict) -> str:
+    """
+    Converte o resultado do test_agent em feedback acionável para o migration_agent.
+    Usa as regressões e sugestões do router, não o relatório textual.
+    """
+    rd          = test_result.get("router_decision", {})
+    regressions = rd.get("regressions_detected", [])
+    suggestions = rd.get("suggestions", [])
+    reasons     = rd.get("reasons", [])
+    equiv_rate  = rd.get("equivalence_rate", 0.0)
+
+    linhas = [
+        "The test agent found behavioral regressions in your urllib→requests migration.",
+        f"Equivalence rate: {equiv_rate:.1f}% (threshold: 90%)\n",
+    ]
+
+    if regressions:
+        linhas.append("## Tests that PASS on original but FAIL on migrated (must fix):")
+        for r in regressions:
+            linhas.append(f"  - {r}")
+        linhas.append("")
+
+    if reasons:
+        linhas.append("## Root cause analysis:")
+        for r in reasons:
+            linhas.append(f"  - {r}")
+        linhas.append("")
+
+    if suggestions:
+        linhas.append("## What to fix in the migration:")
+        for s in suggestions:
+            linhas.append(f"  - {s}")
+        linhas.append("")
+
+    linhas.append("Return ONLY the corrected Python code without any explanation or markdown.")
+    return "\n".join(linhas)
+
+
+def _formatar_feedback_review(review_result: dict) -> str:
+    """
+    Extrai achados do review e monta feedback acionável para o migration_agent.
+    Prioriza P1 (críticos) e inclui P2; descarta o relatorio_final verboso.
+    """
+    achados_semantica = review_result.get("achados_semantica", [])
+    achados_seguranca = review_result.get("achados_seguranca", [])
+    achados_lint      = review_result.get("achados_lint", [])
+
+    todos = achados_semantica + achados_seguranca + achados_lint
+    p1 = [a for a in todos if "[P1]" in a]
+    p2 = [a for a in todos if "[P2]" in a]
+
+    linhas = [
+        "The following issues were found in your urllib→requests migration.",
+        "You MUST fix all [P1] items. [P2] items are also important.\n",
+    ]
+
+    if p1:
+        linhas.append("## CRITICAL [P1] — Must fix:")
+        linhas.extend(p1)
+        linhas.append("")
+
+    if p2:
+        linhas.append("## Important [P2] — Should fix:")
+        linhas.extend(p2)
+        linhas.append("")
+
+    if not p1 and not p2:
+        # Fallback: qualquer achado presente
+        linhas.append("## Issues found:")
+        linhas.extend(todos or ["Review agent reported issues but provided no structured findings."])
+
+    linhas.append(
+        "\nReturn ONLY the corrected Python code without any explanation or markdown."
+    )
+    return "\n".join(linhas)
 
 def main():
     import argparse
@@ -485,17 +588,19 @@ def main():
     while revision_loop <= MAX_REVISION_LOOPS:
 
         # ── ETAPA 1: Migration ────────────────────────────────────────────────
-        # Iteration 0: migrates from the original code.
-        # Subsequent iterations: migrator receives original + router suggestions.
+        # Iteration 0: migração inicial.
+        # Iterações seguintes: migrador recebe feedback estruturado do test_agent
+        # via feedback_revisao e parte do código atual (vai direto ao nó refinar).
         if revision_loop == 0:
             migration_result = run_migration(current_original, num_examples=args.examples)
         else:
-            suggestions = test_result.get("router_decision", {}).get("suggestions", [])
-            context = (
-                "\n\nCONTEXTO DE REVISÃO (iteração {}):\n".format(revision_loop)
-                + "\n".join(f"- {s}" for s in suggestions)
-            ) if suggestions else ""
-            migration_result = run_migration(current_original + context, num_examples=args.examples)
+            test_feedback = _formatar_feedback_teste(test_result)
+            migration_result = run_migration(
+                current_original,
+                num_examples=args.examples,
+                feedback_revisao=test_feedback,
+                codigo_migrado_atual=current_migrated,
+            )
 
         current_migrated = migration_result["migrated_code"]
 
@@ -560,29 +665,136 @@ def main():
         encoding="utf-8",
     )
 
-    # ── ETAPA: Review ─────────────────────────────────────────────────────────
-    if not args.skip_review:
+    # ── Loop review → migration com feedback ─────────────────────────────────
+    # Fluxo: review → se deve_reprocessar → migration(feedback) → review → ...
+    # Para quando review aprova OU MAX_REVIEW_LOOPS iterações são atingidas.
+    review_loop = 0
+
+    while True:
+        if args.skip_review:
+            print("\n  ETAPA 3 — REVIEW AGENT: pulada (--skip-review)")
+            break
+
         wait_review = 10 if not OLLAMA_DISPONIVEL else 5
-        print(f"\n  Aguardando {wait_review}s antes do review (Groq rate limit)...")
+        label = f" (iteração {review_loop + 1}/{MAX_REVIEW_LOOPS + 1})" if review_loop > 0 else ""
+        print(f"\n  Aguardando {wait_review}s antes do review{label} (Groq rate limit)...")
         time.sleep(wait_review)
+
         try:
             review_result = run_review(current_original, current_migrated)
         except Exception as exc:
             print(f"\n  AVISO: review_agent falhou: {exc}")
             review_result = {"error": str(exc)}
-    else:
-        print("\n  ETAPA 3 — REVIEW AGENT: pulada (--skip-review)")
+            break
 
-    if review_result.get("relatorio_final"):
-        (out_dir / "review_report.md").write_text(
-            review_result["relatorio_final"], encoding="utf-8"
-        )
-    if review_result:
-        (out_dir / "review_result.json").write_text(
-            json.dumps({k: v for k, v in review_result.items() if k != "relatorio_final"},
-                       ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        # Salva artefatos desta rodada de review
+        suffix_rev = f"_review{review_loop}" if review_loop > 0 else ""
+        if review_result.get("relatorio_final"):
+            (out_dir / f"review_report{suffix_rev}.md").write_text(
+                review_result["relatorio_final"], encoding="utf-8"
+            )
+        if review_result:
+            (out_dir / f"review_result{suffix_rev}.json").write_text(
+                json.dumps(
+                    {k: v for k, v in review_result.items() if k != "relatorio_final"},
+                    ensure_ascii=False, indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+        if not review_result.get("deve_reprocessar"):
+            print("  ✅ Review aprovou a migração — encerrando loop review→migration.")
+            break
+
+        if review_loop >= MAX_REVIEW_LOOPS:
+            print(f"\n  ⚠️  Limite de {MAX_REVIEW_LOOPS} iterações review→migration atingido — encerrando.")
+            break
+
+        # ── Review pediu reprocessamento: roda migration → test → review ────────
+        review_loop += 1
+        review_feedback = _formatar_feedback_review(review_result)
+
+        print(f"\n  🔁 Review solicitou reprocessamento (iteração {review_loop}/{MAX_REVIEW_LOOPS})"
+              " — executando migrador → testador → revisor com feedback...")
+
+        if not OLLAMA_DISPONIVEL:
+            print("  Aguardando 10s antes do reprocessamento (rate limit Groq)...")
+            time.sleep(10)
+
+        # ── ETAPA 1 (re): Migration com feedback ──────────────────────────────
+        try:
+            mig = _import_migration_agent()
+            print(f"  Carregando {args.examples} exemplos do dataset para reprocessamento...")
+            exemplos = mig.carregar_exemplos_treino(args.examples)
+            prompt_sistema = mig.criar_prompt_treino(exemplos)
+            agente = mig.criar_agente_migracao(exemplos, prompt_sistema)
+
+            from langchain_core.messages import HumanMessage, AIMessage
+
+            resultado_reprocessado = agente.invoke({
+                "messages":        [HumanMessage(content="Refinar migração urllib→requests com feedback do review")],
+                "codigo_usuario":  current_original,
+                "codigo_migrado":  current_migrated,   # código problemático → vai direto ao refinar
+                "feedback_revisao": review_feedback,
+                "status":          "",
+            })
+
+            codigo_reprocessado = resultado_reprocessado.get("codigo_migrado", "")
+            if codigo_reprocessado.strip():
+                current_migrated = codigo_reprocessado
+                (out_dir / f"migrated_code_review{review_loop}.py").write_text(
+                    current_migrated, encoding="utf-8"
+                )
+                reprocessamento_log = [
+                    m.content for m in resultado_reprocessado.get("messages", [])
+                    if isinstance(m, AIMessage)
+                ]
+                (out_dir / f"reprocessamento_log_review{review_loop}.json").write_text(
+                    json.dumps({"iteracao": review_loop, "mensagens": reprocessamento_log},
+                               ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                print(f"  ✅ Migration {review_loop} concluído ({len(codigo_reprocessado.splitlines())} linhas)")
+            else:
+                print("  ⚠️  Migration não gerou novo código — mantendo versão anterior")
+
+        except Exception as exc:
+            print(f"  ❌ Erro ao re-migrar com feedback: {exc}")
+            break
+
+        # ── ETAPA 2 (re): Test após re-migração ───────────────────────────────
+        if not args.skip_test:
+            if not OLLAMA_DISPONIVEL:
+                print("  Aguardando 10s (rate limit Groq entre etapas)...")
+                time.sleep(10)
+            try:
+                test_result_re = run_test(current_original, current_migrated)
+                if test_result_re.get("report"):
+                    (out_dir / f"test_report_review{review_loop}.md").write_text(
+                        test_result_re["report"], encoding="utf-8"
+                    )
+                (out_dir / f"test_result_review{review_loop}.json").write_text(
+                    json.dumps(
+                        {k: v for k, v in test_result_re.items() if k != "report"},
+                        ensure_ascii=False, indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                print(f"  Test {review_loop}: {test_result_re.get('decision', 'unknown')}")
+            except Exception as exc:
+                print(f"  AVISO: test_agent falhou na iteração {review_loop}: {exc}")
+
+    # Salva o artefato final consolidado (última versão após todos os loops)
+    (out_dir / "review_report.md").write_text(
+        review_result.get("relatorio_final", ""), encoding="utf-8"
+    )
+    (out_dir / "review_result.json").write_text(
+        json.dumps(
+            {k: v for k, v in review_result.items() if k != "relatorio_final"},
+            ensure_ascii=False, indent=2,
+        ),
+        encoding="utf-8",
+    )
 
     # ── Sumário final ─────────────────────────────────────────────────────────
     total_elapsed = time.time() - pipeline_start
@@ -615,7 +827,8 @@ def main():
                 "backend": test_result.get("backend"),
             },
             "review": {
-                "deve_reprocessar": review_result.get("deve_reprocessar"),
+                "iteracoes_review_migration": review_loop,
+                "aprovado": not review_result.get("deve_reprocessar"),
                 "achados_total": (
                     len(review_result.get("achados_semantica") or [])
                     + len(review_result.get("achados_seguranca") or [])
@@ -639,12 +852,13 @@ def main():
     print(f"  Migration   : {migration_result.get('status')}")
     print(f"  Test        : {test_result.get('decision', 'skipped')}")
     if review_result.get("error"):
-        print(f"  Review          : erro — {review_result['error'][:80]}")
+        print(f"  Review      : erro — {review_result['error'][:80]}")
     elif args.skip_review:
-        print("  Review          : pulado")
+        print("  Review      : pulado")
     else:
-        status_rev = "reprocessar" if review_result.get("deve_reprocessar") else "aprovado"
-        print(f"  Review      : {status_rev}")
+        status_rev = "aprovado" if not review_result.get("deve_reprocessar") else "reprocessar (limite atingido)"
+        iters_label = f" ({review_loop} reprocessamento{'s' if review_loop != 1 else ''})" if review_loop > 0 else ""
+        print(f"  Review      : {status_rev}{iters_label}")
     print(f"  Artefatos   : {out_dir.resolve()}")
     print(f"{'#'*60}\n")
 

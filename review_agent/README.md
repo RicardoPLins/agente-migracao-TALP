@@ -38,30 +38,40 @@ Entrada (original + migrado)
 ### Nós e responsabilidades
 
 
-| Nó                 | Função                                                          | LLM        |
-| ------------------ | --------------------------------------------------------------- | ---------- |
-| `no_parser`        | `git diff --no-index` + diff estruturado (funções/classes/deps) | Sim (Groq) |
-| `no_classificador` | Roteia para especialistas com base no diff                      | Sim        |
-| `no_roteador`      | Despacha via `Send()`; reseta achados a cada iteração           | —          |
-| `no_semantico`     | Equivalência de comportamento, contratos, null-safety           | Sim        |
-| `no_seguranca`     | Autenticação, validação de inputs, superfície de ataque         | Sim        |
-| `no_lint`          | Ruff via `subprocess`; LLM interpreta regressões novas          | Sim        |
-| `no_critico`       | Meta-avaliador; aprova ou pede refinamento                      | Sim        |
-| `relatorio_final`  | Consolida achados em Markdown com veredito                      | Sim        |
+| Nó                 | Função                                                               | LLM        |
+| ------------------ | -------------------------------------------------------------------- | ---------- |
+| `no_parser`        | `git diff --no-index` + diff estruturado (funções/classes/deps)      | Sim (Groq) |
+| `no_classificador` | Roteia para especialistas com base no diff                           | Sim        |
+| `no_roteador`      | Despacha via `Send()`; reseta achados a cada iteração                | —          |
+| `no_semantico`     | Equivalência de comportamento, contratos, null-safety                | Sim        |
+| `no_seguranca`     | Autenticação, validação de inputs, superfície de ataque              | Sim        |
+| `no_lint`          | Ruff via `subprocess`; LLM interpreta regressões novas               | Sim        |
+| `no_critico`       | Meta-avaliador; aprova ou pede refinamento                           | Sim        |
+| `relatorio_final`  | Template Markdown determinístico (seções 2–6) + resumo executivo LLM | Parcial    |
 
 
-Todos os nós com LLM usam a mesma instância:
+Todos os nós com LLM usam `_get_llm()`:
 
 ```python
-ChatGroq(api_key=os.getenv("API_3"), model_name="llama-3.3-70b-versatile")
+# Groq (default): REVIEW_LLM_PROVIDER=groq + API_3
+# Ollama local:    REVIEW_LLM_PROVIDER=ollama + REVIEW_OLLAMA_MODEL=qwen2.5:7b
 ```
+
+| Variável | Descrição | Default |
+|----------|-----------|---------|
+| `REVIEW_LLM_PROVIDER` | `groq` ou `ollama` | `groq` |
+| `API_3` | Chave Groq | — (obrigatória se `groq`) |
+| `REVIEW_GROQ_MODEL` | Modelo Groq | `llama-3.3-70b-versatile` |
+| `REVIEW_OLLAMA_MODEL` | Modelo Ollama | `qwen2.5:7b` |
+| `OLLAMA_BASE_URL` | API Ollama | `http://localhost:11434` |
+| `REVIEW_OLLAMA_NUM_CTX` | Janela de contexto (VRAM) | (padrão Ollama) |
 
 ---
 
 ## Pré-requisitos
 
 - Python **3.11+**
-- Chave de API na [Groq](https://console.groq.com/) — variável `API_3`
+- Backend LLM: **Groq** (`API_3`) ou **Ollama** local (`REVIEW_LLM_PROVIDER=ollama`)
 - [Ruff](https://docs.astral.sh/ruff/) no `PATH` (nó `no_lint`)
 - `git` no `PATH` (nó `no_parser` — fallback para LLM se ausente)
 
@@ -106,7 +116,7 @@ API_3=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | `LANGSMITH_PROJECT` | Nome do projeto no LangSmith                      | Não         |
 
 
-> **Integração com `test_pipeline.py`:** o pipeline carrega `review_agent/review-agent.py` via `REVIEW_AGENT_DIR` e exige `API_3` antes de executar o review. Para o pipeline completo, configure também `GROQ_API_KEY` (migration) e `PROVIDER_*` (test). Ver [REPLICACAO.md](../REPLICACAO.md).
+> **Integração com `test_pipeline.py`:** o pipeline carrega `review_agent/review-agent.py` via `REVIEW_AGENT_DIR` e exige `API_3` antes de executar o review. Para o pipeline completo, configure também `GROQ_API_KEY` (migration) e `PROVIDER_`* (test). Ver [REPLICACAO.md](../REPLICACAO.md).
 
 ---
 
@@ -151,31 +161,10 @@ Swagger: `http://127.0.0.1:8000/docs`
 
 Envie `codigo_original` e `codigo_migrado` via `multipart/form-data`.
 
-### Uso programático (sem FastAPI)
-
-```python
-import importlib.util
-from pathlib import Path
-from dotenv import load_dotenv
-
-load_dotenv()
-
-REVIEW_AGENT_DIR = Path("review_agent")
-spec = importlib.util.spec_from_file_location(
-    "review_agent", REVIEW_AGENT_DIR / "review-agent.py"
-)
-ra = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(ra)
-
-result = ra._executar_grafo(original_code, migrated_code)
-print(result["relatorio_final"])
-```
-
 ### Via pipeline integrado
 
 ```bash
 python test_pipeline.py              # review_agent/review-agent.py via import dinâmico
-python test_pipeline.py --skip-review
 ```
 
 ---
@@ -183,18 +172,44 @@ python test_pipeline.py --skip-review
 ## Resposta (`_executar_grafo` / API)
 
 
-| Campo               | Tipo     | Descrição                                        |
-| ------------------- | -------- | ------------------------------------------------ |
-| `raw_diff`          | string   | Diff unificado do `git diff --no-index`          |
-| `diff`              | object   | Diff estruturado (funções/classes alteradas)     |
-| `agentes_acionados` | string[] | `"semantica"`, `"seguranca"`, `"lint"`           |
-| `achados_semantica` | string[] | Achados com severidade [P0]–[P3]                 |
-| `achados_seguranca` | string[] | Riscos de segurança [P0]–[P3]                    |
-| `achados_lint`      | string[] | Regressões de lint/style                         |
-| `iteracoes`         | int      | Rodadas do reflection loop (máx. 3)              |
-| `deve_reprocessar`  | bool     | `true` → migration_agent deve refazer a migração |
-| `relatorio_final`   | string   | Relatório Markdown consolidado                   |
+| Campo                  | Tipo     | Descrição                                                |
+| ---------------------- | -------- | -------------------------------------------------------- |
+| `raw_diff`             | string   | Diff unificado do `git diff --no-index`                  |
+| `diff`                 | object   | Diff estruturado (funções/classes alteradas)             |
+| `agentes_acionados`    | string[] | `"semantica"`, `"seguranca"`, `"lint"`                   |
+| `achados_semantica`    | string[] | Achados com severidade [P0]–[P3]                         |
+| `achados_seguranca`    | string[] | Riscos de segurança [P0]–[P3]                            |
+| `achados_lint`         | string[] | Regressões de lint/style                                 |
+| `achados_estruturados` | object[] | Achados parseados (severidade, símbolo, linha corrigida) |
+| `iteracoes`            | int      | Rodadas do reflection loop (máx. 3)                      |
+| `deve_reprocessar`     | bool     | `true` → migration_agent deve refazer a migração         |
+| `relatorio_final`      | string   | Relatório Markdown consolidado                           |
 
+
+### Template do `review_report.md`
+
+O nó `relatorio_final` **não** delega o relatório inteiro ao LLM. A estrutura é montada em Python (`_gerar_relatorio_markdown`):
+
+1. **Legenda P0–P3** — tabela com significado e ação recomendada
+2. **Resumo executivo** — única parte gerada pelo LLM (`relatorio_final.json`)
+3. **Veredito** — APROVADO / APROVADO COM RESSALVAS / REPROVADO / REPROCESSAR
+4. **Achados por severidade** — P0, P1, P2, P3 com emojis
+5. **Detalhamento por agente** — semântica, segurança, lint
+6. **Recomendações prioritárias** — contagem por severidade
+7. **Notas sobre linhas** — explica a correção automática
+
+### Correção de linhas (`achados_estruturados`)
+
+A LLM frequentemente erra números de linha (especialmente ao copiar do hunk do diff). O pipeline:
+
+1. Faz parse de cada achado (`[PREFIX][Px] \`funcao (line N) — …`)
+2. Indexa `def nome()` no código migrado
+3. Quando o símbolo existe, **substitui** a linha pela definição real
+4. Anota *(modelo citou linha N)* quando houve divergência
+
+Os achados corrigidos aparecem em `achados_semantica` / `achados_seguranca` / `achados_lint` (strings) e em `achados_estruturados` (JSON com `linha`, `linha_llm`, `linha_corrigida`).
+
+Semântica e segurança recebem **trechos numerados** só das funções em `altered_functions` / `added_functions` (`<<trechos_migrados>>`), não o arquivo migrado inteiro — economia de tokens mantendo contexto local. O lint continua com `codigo_migrado` completo (Ruff + anti-patterns).
 
 ---
 
@@ -203,6 +218,7 @@ python test_pipeline.py --skip-review
 ```
 review_agent/
 ├── prompts/
+│   ├── regras_migracao.txt          # Contrato fixo urllib→requests (injetado nos prompts)
 │   ├── parser.json
 │   ├── classificador.json
 │   ├── agente_semantica.json
@@ -240,16 +256,16 @@ review_agent/
 ### Placeholders por nó
 
 
-| Arquivo                          | Placeholders                                                                               |
-| -------------------------------- | ------------------------------------------------------------------------------------------ |
-| `parser.json`                    | `<<codigo_original>>`, `<<codigo_migrado>>`, `<<raw_diff>>`                                |
-| `classificador.json`             | `<<diff_str>>`                                                                             |
-| `agente_semantica.json`          | `<<critica>>`, `<<diff_str>>`, `<<raw_diff>>`, `<<codigo_original>>`, `<<codigo_migrado>>` |
-| `agente_seguranca.json`          | idem semântica                                                                             |
-| `agente_lint_config.json`        | `<<codigo_original>>`                                                                      |
-| `agente_lint_interpretacao.json` | `<<critica>>`, `<<novos_issues>>`, `<<estilo_inferido>>`, `<<codigo_migrado>>`             |
-| `no_critico.json`                | `<<iteracao>>`, `<<achados_str>>`                                                          |
-| `relatorio_final.json`           | `<<achados_str>>`, `<<diff_str>>`                                                          |
+| Arquivo                          | Placeholders                                                                                          |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `parser.json`                    | `<<codigo_original>>`, `<<codigo_migrado>>`, `<<raw_diff>>`                                           |
+| `classificador.json`             | `<<diff_str>>`                                                                                        |
+| `agente_semantica.json`          | `<<critica>>`, `<<diff_str>>`, `<<raw_diff>>`, `<<trechos_migrados>>`, `<<regras_migracao>>`          |
+| `agente_seguranca.json`          | idem semântica                                                                                        |
+| `agente_lint_config.json`        | `<<codigo_original>>`                                                                                 |
+| `agente_lint_interpretacao.json` | `<<critica>>`, `<<novos_issues>>`, `<<estilo_inferido>>`, `<<codigo_migrado>>`, `<<regras_migracao>>` |
+| `no_critico.json`                | `<<iteracao>>`, `<<achados_str>>`, `<<regras_migracao>>`                                              |
+| `relatorio_final.json`           | `<<achados_resumo>>`, `<<deve_reprocessar>>` (apenas resumo executivo)                                |
 
 
 `<<critica>>` é preenchido pelo `no_critico` nas iterações de refinamento; na primeira rodada fica vazio.

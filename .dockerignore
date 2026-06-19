@@ -1,0 +1,19 @@
+# Virtual environments (rebuilt fresh inside the image)
+.venv/
+**/.venv/
+**/__pycache__/
+*.pyc
+
+# Version control
+.git/
+.gitignore
+
+# Pipeline artifacts / caches — generated at runtime, mount as volumes instead
+.pipeline_output/
+.loop_output/
+.mypy_cache/
+review_agent/eval/results/
+
+# Secrets — never bake into the image, pass via env_file/--env-file at runtime
+.env
+.env.example1

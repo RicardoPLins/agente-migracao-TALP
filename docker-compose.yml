@@ -1,0 +1,20 @@
+services:
+  pipeline:
+    build: .
+    env_file:
+      - .env
+    environment:
+      # Padrão aponta para o Ollama rodando no host (Docker Desktop resolve
+      # host.docker.internal nativamente; no Linux, extra_hosts abaixo cobre isso).
+      # Sobrescreva no .env se o Ollama estiver em outro endereço, ou remova
+      # se quiser usar apenas Groq.
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Artefatos do pipeline ficam acessíveis no host
+      - ./.pipeline_output:/app/.pipeline_output
+      # Troque pelo seu arquivo de entrada (mantém url.py como padrão)
+      - ./url.py:/app/url.py:ro
+    # Args extras de test_pipeline.py podem ser passados aqui, ex.:
+    # command: ["--input", "url.py", "--skip-review"]

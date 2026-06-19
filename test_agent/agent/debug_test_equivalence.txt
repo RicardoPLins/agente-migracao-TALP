@@ -1,165 +1,56 @@
 ============================= test session starts =============================
 collecting ... collected 3 items
 
-test_equivalence.py::test_generateRequestData FAILED                     [ 33%]
-test_equivalence.py::test_executeRequest FAILED                          [ 66%]
-test_equivalence.py::test_init PASSED                                    [100%]
+==================================== ERRORS ====================================
+_____________________ ERROR collecting test_equivalence.py _____________________
 
-================================== FAILURES ===================================
-__________________________ test_generateRequestData ___________________________
+    import pytest
+    import urllib.parse
+    import urllib.error
+    import urllib.request
+    import gzip
+    import io
+    import json
+    import responses
+    import requests
+    from unittest.mock import MagicMock, patch, Mock
+    
+>   from original_module import _update as orig_update, _check as orig_check
 
-setup_module_quirks = {'migrated': {'generateRequestData_return_type': 'dict', 'local_imports': [], 'main_class_name': None, 'missing_import...Data_return_type': 'bytes', 'local_imports': [], 'main_class_name': 'ConversationScraper', 'missing_imports': [], ...}}
+test_equivalence.py:12: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
 
-    def test_generateRequestData(setup_module_quirks):
-        original_scraper = OriginalClass("convID", "cookie", "fb_dtsg", "outDir")
-        migrated_scraper = MigratedClass("convID", "cookie", "fb_dtsg", "outDir")
-    
-        offset = 0
-        timestamp = ""
-        chunkSize = 2000
-    
-        original_data = original_scraper.generateRequestData(offset, timestamp, chunkSize)
-        migrated_data = migrated_scraper.generateRequestData(offset, timestamp, chunkSize)
-    
-        # Normalize for comparison
->       original_data = urllib.parse.parse_qs(original_data.decode('utf-8'))
-                        ^^^^^^
-E       NameError: name 'urllib' is not defined. Did you forget to import 'urllib'
+>   URLLIB
+E   NameError: name 'URLLIB' is not defined
 
-test_equivalence.py:50: NameError
-_____________________________ test_executeRequest _____________________________
+original_module.py:1: NameError
+=============================== warnings summary ===============================
+original_module.py:15
+  /private/var/folders/qd/vpldsh2506q3p2xlqbm_pc3r0000gn/T/tmpss6llt57/original_module.py:15: SyntaxWarning: "is" with 'int' literal. Did you mean "=="?
+    if version() is 2:
 
-setup_module_quirks = {'migrated': {'generateRequestData_return_type': 'dict', 'local_imports': [], 'main_class_name': None, 'missing_import...Data_return_type': 'bytes', 'local_imports': [], 'main_class_name': 'ConversationScraper', 'missing_imports': [], ...}}
+original_module.py:17
+  /private/var/folders/qd/vpldsh2506q3p2xlqbm_pc3r0000gn/T/tmpss6llt57/original_module.py:17: SyntaxWarning: "is" with 'int' literal. Did you mean "=="?
+    if version() is 3:
 
-    @responses.activate
-    def test_executeRequest(setup_module_quirks):
-        original_scraper = OriginalClass("convID", "cookie", "fb_dtsg", "outDir")
-        migrated_scraper = MigratedClass("convID", "cookie", "fb_dtsg", "outDir")
-    
-        offset = 0
-        timestamp = ""
-        chunkSize = 2000
-    
-        original_data = original_scraper.generateRequestData(offset, timestamp, chunkSize)
-        migrated_data = migrated_scraper.generateRequestData(offset, timestamp, chunkSize)
-    
-        payload = {"key": "value"}
-        compressed = gzip.compress(json.dumps(payload).encode())
-        buf = io.BytesIO(compressed)
-        mock_resp = MagicMock()
-        mock_resp.read.side_effect = buf.read
-        mock_resp.readable.return_value = True
-        mock_resp.seekable.return_value = False
-        mock_resp.writable.return_value = False
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-    
-        with patch.object(original_scraper, 'executeRequest', return_value="X" * setup_module_quirks["original"]["response_strip_chars"] + json.dumps(payload)):
-            original_response = original_scraper.executeRequest(original_data)
-    
-        responses.add(responses.POST, 'https://www.facebook.com/ajax/mercury/thread_info.php',
-                     body="X" * setup_module_quirks["migrated"]["response_strip_chars"] + json.dumps(payload), status=200)
-    
-        migrated_response = migrated_scraper.executeRequest(migrated_data)
-    
->       assert json.loads(original_response) == json.loads(migrated_response)
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+original_module.py:21
+  /private/var/folders/qd/vpldsh2506q3p2xlqbm_pc3r0000gn/T/tmpss6llt57/original_module.py:21: SyntaxWarning: "is" with 'int' literal. Did you mean "=="?
+    if version() is 3:
 
-test_equivalence.py:86: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+original_module.py:35
+  /private/var/folders/qd/vpldsh2506q3p2xlqbm_pc3r0000gn/T/tmpss6llt57/original_module.py:35: SyntaxWarning: "is" with 'int' literal. Did you mean "=="?
+    if version() is 2:
 
-s = 'XXXXXXXXX{"key": "value"}', cls = None, object_hook = None
-parse_float = None, parse_int = None, parse_constant = None
-object_pairs_hook = None, kw = {}
+original_module.py:37
+  /private/var/folders/qd/vpldsh2506q3p2xlqbm_pc3r0000gn/T/tmpss6llt57/original_module.py:37: SyntaxWarning: "is" with 'int' literal. Did you mean "=="?
+    if version() is 3:
 
-    def loads(s, *, cls=None, object_hook=None, parse_float=None,
-            parse_int=None, parse_constant=None, object_pairs_hook=None, **kw):
-        """Deserialize ``s`` (a ``str``, ``bytes`` or ``bytearray`` instance
-        containing a JSON document) to a Python object.
-    
-        ``object_hook`` is an optional function that will be called with the
-        result of any object literal decode (a ``dict``). The return value of
-        ``object_hook`` will be used instead of the ``dict``. This feature
-        can be used to implement custom decoders (e.g. JSON-RPC class hinting).
-    
-        ``object_pairs_hook`` is an optional function that will be called with the
-        result of any object literal decoded with an ordered list of pairs.  The
-        return value of ``object_pairs_hook`` will be used instead of the ``dict``.
-        This feature can be used to implement custom decoders.  If ``object_hook``
-        is also defined, the ``object_pairs_hook`` takes priority.
-    
-        ``parse_float``, if specified, will be called with the string
-        of every JSON float to be decoded. By default this is equivalent to
-        float(num_str). This can be used to use another datatype or parser
-        for JSON floats (e.g. decimal.Decimal).
-    
-        ``parse_int``, if specified, will be called with the string
-        of every JSON int to be decoded. By default this is equivalent to
-        int(num_str). This can be used to use another datatype or parser
-        for JSON integers (e.g. float).
-    
-        ``parse_constant``, if specified, will be called with one of the
-        following strings: -Infinity, Infinity, NaN.
-        This can be used to raise an exception if invalid JSON numbers
-        are encountered.
-    
-        To use a custom ``JSONDecoder`` subclass, specify it with the ``cls``
-        kwarg; otherwise ``JSONDecoder`` is used.
-        """
-        if isinstance(s, str):
-            if s.startswith('\ufeff'):
-                raise JSONDecodeError("Unexpected UTF-8 BOM (decode using utf-8-sig)",
-                                      s, 0)
-        else:
-            if not isinstance(s, (bytes, bytearray)):
-                raise TypeError(f'the JSON object must be str, bytes or bytearray, '
-                                f'not {s.__class__.__name__}')
-            s = s.decode(detect_encoding(s), 'surrogatepass')
-    
-        if (cls is None and object_hook is None and
-                parse_int is None and parse_float is None and
-                parse_constant is None and object_pairs_hook is None and not kw):
->           return _default_decoder.decode(s)
-                   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+original_module.py:41
+  /private/var/folders/qd/vpldsh2506q3p2xlqbm_pc3r0000gn/T/tmpss6llt57/original_module.py:41: SyntaxWarning: "is" with 'int' literal. Did you mean "=="?
+    if version() is 3:
 
-C:\Python312\Lib\json\__init__.py:346: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
-
-self = <json.decoder.JSONDecoder object at 0x00000204E86C6240>
-s = 'XXXXXXXXX{"key": "value"}'
-_w = <built-in method match of re.Pattern object at 0x00000204E86B2330>
-
-    def decode(self, s, _w=WHITESPACE.match):
-        """Return the Python representation of ``s`` (a ``str`` instance
-        containing a JSON document).
-    
-        """
->       obj, end = self.raw_decode(s, idx=_w(s, 0).end())
-                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-C:\Python312\Lib\json\decoder.py:337: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
-
-self = <json.decoder.JSONDecoder object at 0x00000204E86C6240>
-s = 'XXXXXXXXX{"key": "value"}', idx = 0
-
-    def raw_decode(self, s, idx=0):
-        """Decode a JSON document from ``s`` (a ``str`` beginning with
-        a JSON document) and return a 2-tuple of the Python
-        representation and the index in ``s`` where the document ended.
-    
-        This can be used to decode a JSON document from a string that may
-        have extraneous data at the end.
-    
-        """
-        try:
-            obj, end = self.scan_once(s, idx)
-        except StopIteration as err:
->           raise JSONDecodeError("Expecting value", s, err.value) from None
-E           json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
-
-C:\Python312\Lib\json\decoder.py:355: JSONDecodeError
-=========================== short test summary info ===========================
-FAILED test_equivalence.py::test_generateRequestData - NameError: name 'urlli...
-FAILED test_equivalence.py::test_executeRequest - json.decoder.JSONDecodeErro...
-========================= 2 failed, 1 passed in 0.31s =========================
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+ERROR test_equivalence.py - NameError: name 'URLLIB' is not defined
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+========================= 6 warnings, 1 error in 0.08s =========================

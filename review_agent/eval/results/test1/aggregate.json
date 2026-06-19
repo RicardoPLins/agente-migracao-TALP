@@ -1,0 +1,13 @@
+{
+  "runs": 1,
+  "schema_invalid_count": 0,
+  "strict_pass_count": 1,
+  "strict_pass_rate": 1.0,
+  "recall_R_mean": 1.0,
+  "r_mean": 1.0,
+  "r_std": 0.0,
+  "r_min": 1.0,
+  "r_max": 1.0,
+  "pass@1": 1.0,
+  "pass^1": 1.0
+}
