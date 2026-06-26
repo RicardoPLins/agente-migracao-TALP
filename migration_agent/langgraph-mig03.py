@@ -74,7 +74,7 @@ def _criar_modelo_migracao():
             ChatOllama(
                 model=_OLLAMA_MODEL_ATIVO,
                 base_url=_OLLAMA_HOST,
-                temperature=0.0,
+                temperature=0.8,
             ),
             f"Ollama ({_OLLAMA_MODEL_ATIVO})",
         )
@@ -82,7 +82,7 @@ def _criar_modelo_migracao():
     return (
         ChatGroq(
             model="llama-3.3-70b-versatile",
-            temperature=0.0,
+            temperature=0.8,
         ),
         "Groq (llama-3.3-70b-versatile)",
     )
@@ -164,7 +164,7 @@ def criar_prompt_treino(exemplos: list[dict]) -> str:
     prompt = """You are an expert Python code migration specialist. Your task is to migrate Python code from urllib to requests library.
 
 Key migration rules:
-1. IMPORTS: Replace "from urllib.request import ..." with "import requests"
+1. IMPORTS: Replace "from urllib.request import ..." with "import requests" and remove unused imports in the code.
 2. METHODS: Replace urlopen() with requests.get() or requests.post()
 3. HEADERS: Replace response.getheader('name') with response.headers.get('name')
 4. READING: Replace response.read().decode('utf-8') with response.text
