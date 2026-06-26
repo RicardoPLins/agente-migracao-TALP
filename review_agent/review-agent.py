@@ -1999,6 +1999,16 @@ app.add_middleware(
 )
 
 
+def _descrever_backend() -> str:
+    """Label legível do backend LLM realmente configurado para esta execução."""
+    provider = os.getenv("REVIEW_LLM_PROVIDER", "groq").strip().lower()
+    if provider == "ollama":
+        modelo = os.getenv("REVIEW_OLLAMA_MODEL", "qwen2.5:7b")
+        return f"Ollama ({modelo})"
+    modelo = os.getenv("REVIEW_GROQ_MODEL", "llama-3.3-70b-versatile")
+    return f"Groq ({modelo} via API_3)"
+
+
 def _executar_grafo(codigo_original: str, codigo_migrado: str) -> dict:
     """Inicializa o estado e executa o grafo. Compartilhado pelos dois endpoints."""
     initial_state: CodeReviewState = {
@@ -2036,6 +2046,7 @@ def _executar_grafo(codigo_original: str, codigo_migrado: str) -> dict:
         "deve_reprocessar":  deve_reprocessar,
         "veredito":          veredito,
         "relatorio_final":   result.get("relatorio_final", ""),
+        "backend":           _descrever_backend(),
     }
 
 
