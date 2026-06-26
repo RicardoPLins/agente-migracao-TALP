@@ -350,7 +350,10 @@ def run_test(original_code: str, migrated_code: str) -> dict:
     """Executa o test_agent. Retorna: report, evaluation, decision, iteration."""
     print(f"\n{'='*60}")
     print("  ETAPA 2 — TEST AGENT")
-    backend = f"Ollama ({OLLAMA_MODEL})" if OLLAMA_DISPONIVEL else "Groq (llama-3.3-70b-versatile)"
+    # test_agent/agent/agent.py instancia um ChatOpenAI fixo (PROVIDER_API_KEY/
+    # PROVIDER_BASE_URL) no carregamento do módulo — não usa Ollama mesmo
+    # quando disponível (ChatOllama é importado mas nunca instanciado lá).
+    backend = "Groq (llama-3.3-70b-versatile via PROVIDER_API_KEY)"
     print(f"  Backend : {backend}")
     print(f"{'='*60}")
     t0 = time.time()
@@ -384,13 +387,13 @@ def run_test(original_code: str, migrated_code: str) -> dict:
 def run_review(original_code: str, migrated_code: str, max_retries: int = 3) -> dict:
     """
     Executa o review_agent diretamente (sem FastAPI).
-    Todos os nós usam Groq llama-3.3-70b-versatile via API_3.
-    Retry externo com backoff para erros que escapem dos retries internos.
+    Backend real depende de REVIEW_LLM_PROVIDER (groq, default, ou ollama) —
+    ver review_agent._get_llm(). O label abaixo é só um placeholder até a
+    execução terminar e revelar o backend efetivo.
     """
     print(f"\n{'='*60}")
     print("  ETAPA 3 — REVIEW AGENT")
     backend_rev = "Groq (llama-3.3-70b-versatile via API_3)"
-    print(f"  Backend : {backend_rev}")
     print(f"{'='*60}")
     t0 = time.time()
 
@@ -425,7 +428,9 @@ def run_review(original_code: str, migrated_code: str, max_retries: int = 3) -> 
                 raise
 
     elapsed = time.time() - t0
+    backend_efetivo = result.get("backend", backend_rev)
 
+    print(f"  Backend           : {backend_efetivo}")
     print(f"  Agentes acionados : {result.get('agentes_acionados', [])}")
     print(f"  Iteracoes critico : {result.get('iteracoes', 0)}")
     print(f"  Deve reprocessar  : {result.get('deve_reprocessar', False)}")
@@ -434,7 +439,6 @@ def run_review(original_code: str, migrated_code: str, max_retries: int = 3) -> 
     print(f"  Achados lint      : {len(result.get('achados_lint', []))}")
     print(f"  Tempo             : {elapsed:.1f}s")
 
-    backend_efetivo = result.get("backend", backend_rev)
     return {**result, "elapsed_s": elapsed, "backend": backend_efetivo}
 
 
@@ -721,68 +725,92 @@ def main():
             print("  Aguardando 10s antes do reprocessamento (rate limit Groq)...")
             time.sleep(10)
 
-        # ── ETAPA 1 (re): Migration com feedback ──────────────────────────────
+        # ── ETAPA 1 (re): Migration com feedback do review ────────────────────
         try:
-            mig = _import_migration_agent()
-            print(f"  Carregando {args.examples} exemplos do dataset para reprocessamento...")
-            exemplos = mig.carregar_exemplos_treino(args.examples)
-            prompt_sistema = mig.criar_prompt_treino(exemplos)
-            agente = mig.criar_agente_migracao(exemplos, prompt_sistema)
-
-            from langchain_core.messages import HumanMessage, AIMessage
-
-            resultado_reprocessado = agente.invoke({
-                "messages":        [HumanMessage(content="Refinar migração urllib→requests com feedback do review")],
-                "codigo_usuario":  current_original,
-                "codigo_migrado":  current_migrated,   # código problemático → vai direto ao refinar
-                "feedback_revisao": review_feedback,
-                "status":          "",
-            })
-
-            codigo_reprocessado = resultado_reprocessado.get("codigo_migrado", "")
-            if codigo_reprocessado.strip():
-                current_migrated = codigo_reprocessado
-                (out_dir / f"migrated_code_review{review_loop}.py").write_text(
-                    current_migrated, encoding="utf-8"
-                )
-                reprocessamento_log = [
-                    m.content for m in resultado_reprocessado.get("messages", [])
-                    if isinstance(m, AIMessage)
-                ]
-                (out_dir / f"reprocessamento_log_review{review_loop}.json").write_text(
-                    json.dumps({"iteracao": review_loop, "mensagens": reprocessamento_log},
-                               ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-                print(f"  ✅ Migration {review_loop} concluído ({len(codigo_reprocessado.splitlines())} linhas)")
-            else:
-                print("  ⚠️  Migration não gerou novo código — mantendo versão anterior")
-
+            migration_result_re = run_migration(
+                current_original,
+                num_examples=args.examples,
+                feedback_revisao=review_feedback,
+                codigo_migrado_atual=current_migrated,
+            )
+            current_migrated = migration_result_re["migrated_code"]
+            (out_dir / f"migrated_code_review{review_loop}.py").write_text(
+                current_migrated, encoding="utf-8"
+            )
+            (out_dir / f"migration_result_review{review_loop}.json").write_text(
+                json.dumps(
+                    {k: v for k, v in migration_result_re.items() if k != "migrated_code"},
+                    ensure_ascii=False, indent=2,
+                ),
+                encoding="utf-8",
+            )
+            print(f"  ✅ Migration {review_loop} concluído ({len(current_migrated.splitlines())} linhas)")
         except Exception as exc:
             print(f"  ❌ Erro ao re-migrar com feedback: {exc}")
             break
 
-        # ── ETAPA 2 (re): Test após re-migração ───────────────────────────────
+        # ── ETAPA 2 (re): Loop test → migration (até MAX_REVISION_LOOPS) ──────
+        # Mesma lógica do loop migration↔test inicial: se o test_agent apontar
+        # erro, devolve feedback estruturado para o migration_agent refinar
+        # antes de seguir para a próxima rodada de review.
         if not args.skip_test:
-            if not OLLAMA_DISPONIVEL:
-                print("  Aguardando 10s (rate limit Groq entre etapas)...")
-                time.sleep(10)
-            try:
-                test_result_re = run_test(current_original, current_migrated)
-                if test_result_re.get("report"):
-                    (out_dir / f"test_report_review{review_loop}.md").write_text(
-                        test_result_re["report"], encoding="utf-8"
-                    )
-                (out_dir / f"test_result_review{review_loop}.json").write_text(
-                    json.dumps(
-                        {k: v for k, v in test_result_re.items() if k != "report"},
-                        ensure_ascii=False, indent=2,
-                    ),
-                    encoding="utf-8",
+            test_revision_loop = 0
+            while test_revision_loop <= MAX_REVISION_LOOPS:
+                if not OLLAMA_DISPONIVEL:
+                    print("  Aguardando 10s (rate limit Groq entre etapas)...")
+                    time.sleep(10)
+
+                suffix_test = (
+                    f"_review{review_loop}_test{test_revision_loop}"
+                    if test_revision_loop > 0 else f"_review{review_loop}"
                 )
-                print(f"  Test {review_loop}: {test_result_re.get('decision', 'unknown')}")
-            except Exception as exc:
-                print(f"  AVISO: test_agent falhou na iteração {review_loop}: {exc}")
+                try:
+                    test_result_re = run_test(current_original, current_migrated)
+                    if test_result_re.get("report"):
+                        (out_dir / f"test_report{suffix_test}.md").write_text(
+                            test_result_re["report"], encoding="utf-8"
+                        )
+                    (out_dir / f"test_result{suffix_test}.json").write_text(
+                        json.dumps(
+                            {k: v for k, v in test_result_re.items() if k != "report"},
+                            ensure_ascii=False, indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
+                    print(f"  Test {review_loop}.{test_revision_loop}: {test_result_re.get('decision', 'unknown')}")
+                except Exception as exc:
+                    print(f"  AVISO: test_agent falhou na iteração {review_loop}: {exc}")
+                    break
+
+                needs_revision_re = test_result_re.get("router_decision", {}).get("needs_revision", False)
+                if not needs_revision_re:
+                    break  # teste aprovou — segue para a próxima rodada de review
+
+                if test_revision_loop >= MAX_REVISION_LOOPS:
+                    print(f"  ⚠️  Limite de {MAX_REVISION_LOOPS} revisões de teste atingido — seguindo para review")
+                    break
+
+                test_revision_loop += 1
+                print(f"\n  🔄 Test apontou erro — refinando migração ({test_revision_loop}/{MAX_REVISION_LOOPS})...")
+                if not OLLAMA_DISPONIVEL:
+                    print("  Aguardando 15s para respeitar rate limit do Groq...")
+                    time.sleep(15)
+
+                try:
+                    test_feedback_re = _formatar_feedback_teste(test_result_re)
+                    migration_result_re = run_migration(
+                        current_original,
+                        num_examples=args.examples,
+                        feedback_revisao=test_feedback_re,
+                        codigo_migrado_atual=current_migrated,
+                    )
+                    current_migrated = migration_result_re["migrated_code"]
+                    (out_dir / f"migrated_code_review{review_loop}_test{test_revision_loop}.py").write_text(
+                        current_migrated, encoding="utf-8"
+                    )
+                except Exception as exc:
+                    print(f"  ❌ Erro ao refinar com feedback de teste: {exc}")
+                    break
 
     # Salva o artefato final consolidado (última versão após todos os loops)
     (out_dir / "review_report.md").write_text(
@@ -806,10 +834,17 @@ def main():
         "backend": {
             "ollama_disponivel": OLLAMA_DISPONIVEL,
             "ollama_model": OLLAMA_MODEL if OLLAMA_DISPONIVEL else None,
-            "groq_usado_em": (
-                ["migration", "review"] if not OLLAMA_DISPONIVEL
-                else (["review"] if not args.skip_review else [])
-            ),
+            # Derivado dos backends efetivamente reportados por cada etapa
+            # (cada um decide seu próprio provider — ver migration_result/
+            # test_result/review_result["backend"]), não de uma suposição estática.
+            "groq_usado_em": [
+                nome for nome, res in (
+                    ("migration", migration_result),
+                    ("test", test_result),
+                    ("review", review_result),
+                )
+                if "groq" in str(res.get("backend", "")).lower()
+            ],
             "review_api_key": "API_3" if not args.skip_review else None,
         },
         "stages": {
