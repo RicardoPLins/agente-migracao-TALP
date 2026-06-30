@@ -4,6 +4,8 @@ Pipeline de migração automatizada de código Python (ex.: `urllib` → `reques
 
 Para replicar o projeto do zero em Linux, macOS ou Windows — incluindo instalação, chaves de API e troubleshooting — consulte **[REPLICACAO.md](REPLICACAO.md)**.
 
+Para rodar o pipeline com Docker (sem instalar Python/dependências), consulte **[DOCKER.md](DOCKER.md)**.
+
 ---
 
 ## Visão geral do pipeline
@@ -153,6 +155,7 @@ Opções úteis: `--skip-test`, `--skip-review`, `--input meu_codigo.py`, `--exa
 | Arquivo                                          | Conteúdo                                            |
 | ------------------------------------------------ | --------------------------------------------------- |
 | [REPLICACAO.md](REPLICACAO.md)                   | Guia completo de replicação (Linux, macOS, Windows) |
+| [DOCKER.md](DOCKER.md)                           | Como rodar o pipeline com Docker / Docker Compose   |
 | [PIPELINE.md](PIPELINE.md)                       | Detalhes do `test_pipeline.py`                      |
 | [review_agent/README.md](review_agent/README.md) | API e arquitetura do review                         |
 | [test_agent/README.md](test_agent/README.md)     | Thresholds e uso do test agent                      |
