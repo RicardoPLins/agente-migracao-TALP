@@ -288,18 +288,11 @@ def run_migration(
 
     mig = _import_migration_agent()
 
+    # Os exemplos few-shot só são carregados dentro do nó "migrar" (ou nunca,
+    # no modo refinamento — vai direto para "refinar", que usa prompt próprio).
     if feedback_revisao:
-        # Modo refinamento: não precisa de exemplos — o nó refinar usa prompt dedicado
-        print("  Modo refinamento — pulando carregamento do dataset.")
-        exemplos = []
-    else:
-        print(f"  Carregando {num_examples} exemplos do dataset...")
-        exemplos = mig.carregar_exemplos_treino(num_examples)
-        if not exemplos:
-            print("  AVISO: nenhum exemplo carregado — usando prompt base sem few-shot.")
-
-    prompt_sistema = mig.criar_prompt_treino(exemplos)
-    agente = mig.criar_agente_migracao(exemplos, prompt_sistema)
+        print("  Modo refinamento — vai direto ao nó 'refinar' (sem carregar dataset).")
+    agente = mig.criar_agente_migracao(num_examples)
 
     from langchain_core.messages import HumanMessage, AIMessage
 
