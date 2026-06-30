@@ -74,7 +74,7 @@ def _criar_modelo_migracao():
             ChatOllama(
                 model=_OLLAMA_MODEL_ATIVO,
                 base_url=_OLLAMA_HOST,
-                temperature=0.8,
+                temperature=0.0,
             ),
             f"Ollama ({_OLLAMA_MODEL_ATIVO})",
         )
@@ -82,7 +82,7 @@ def _criar_modelo_migracao():
     return (
         ChatGroq(
             model="llama-3.3-70b-versatile",
-            temperature=0.8,
+            temperature=0.0,
         ),
         "Groq (llama-3.3-70b-versatile)",
     )
@@ -261,21 +261,26 @@ def no_receber_codigo(estado: EstadoAgente) -> dict:
     }
 
 
-def no_migrar_com_llm(estado: EstadoAgente, exemplos_treino: list[dict], prompt_sistema: str) -> dict:
+def no_migrar_com_llm(estado: EstadoAgente, num_exemplos: int = 10) -> dict:
     """
     Use LLM (Groq) to intelligently migrate code.
-    
+
+    Few-shot examples are loaded HERE, not before the graph runs — this node
+    is only reachable after `receber` validates the input contains urllib
+    code, so a rejected input never pays the dataset-loading cost.
+
     Args:
         estado: Current state
-        exemplos_treino: Training examples for few-shot learning
-        prompt_sistema: System prompt with training examples
-    
+        num_exemplos: Number of few-shot training examples to load
+
     Returns:
         Updated state with migrated code
     """
     codigo_usuario = estado["codigo_usuario"]
 
     try:
+        exemplos_treino = carregar_exemplos_treino(num_exemplos)
+        prompt_sistema = criar_prompt_treino(exemplos_treino)
         model, backend_label = _criar_modelo_migracao()
         
         # Create messages
@@ -326,14 +331,15 @@ Return ONLY the migrated Python code without any explanation or markdown.""")
         }
 
 
-def no_refinar_com_feedback(estado: EstadoAgente, exemplos_treino: list[dict], prompt_sistema: str) -> dict:
+def no_refinar_com_feedback(estado: EstadoAgente) -> dict:
     """
     Refine the migrated code using feedback from the review agent.
 
+    Uses a dedicated focused prompt (_PROMPT_REFINAMENTO), not the few-shot
+    training prompt — so it doesn't need exemplos_treino/prompt_sistema.
+
     Args:
         estado: Current state
-        exemplos_treino: Training examples for few-shot learning
-        prompt_sistema: System prompt with training examples
 
     Returns:
         Updated state with refined migrated code
@@ -492,23 +498,27 @@ def decidir_proxima_etapa(estado: EstadoAgente) -> Literal["inferir", "migrar", 
 # GRAPH CONSTRUCTION
 # =============================================================================
 
-def criar_agente_migracao(exemplos_treino: list[dict], prompt_sistema: str):
+def criar_agente_migracao(num_exemplos: int = 10):
     """
     Build the migration agent graph.
-    
+
+    Few-shot examples are NOT loaded here — the `migrar` node loads them
+    lazily on execution, which only happens after `receber` validates the
+    input. This keeps dataset loading strictly after input validation.
+
     Args:
-        exemplos_treino: Training examples
-        prompt_sistema: System prompt with examples
-    
+        num_exemplos: Number of few-shot training examples to load if/when
+            the `migrar` node runs.
+
     Returns:
         Compiled graph
     """
     grafo = StateGraph(EstadoAgente)
-    
+
     # Add nodes
     grafo.add_node("receber", no_receber_codigo)
-    grafo.add_node("migrar", lambda estado: no_migrar_com_llm(estado, exemplos_treino, prompt_sistema))
-    grafo.add_node("refinar", lambda estado: no_refinar_com_feedback(estado, exemplos_treino, prompt_sistema))
+    grafo.add_node("migrar", lambda estado: no_migrar_com_llm(estado, num_exemplos))
+    grafo.add_node("refinar", no_refinar_com_feedback)
     grafo.add_node("validar", no_validar_migracao)
     
     # Add edges
@@ -547,29 +557,20 @@ def criar_agente_migracao(exemplos_treino: list[dict], prompt_sistema: str):
 # =============================================================================
 # MAIN EXECUTION
 # =============================================================================
-def preparar_contexto_migracao(num_exemplos: int = 10) -> tuple[list[dict], str]:
-    """Carrega exemplos few-shot + prompt-sistema UMA vez (reutilizado no loop)."""
-    exemplos = carregar_exemplos_treino(num_exemplos)
-    prompt_sistema = criar_prompt_treino(exemplos)
-    return exemplos, prompt_sistema
-
-
-def migrar_codigo(codigo_usuario, exemplos_treino, prompt_sistema) -> str:
-    """Migração inicial urllib→requests."""
+def migrar_codigo(codigo_usuario, num_exemplos: int = 10) -> str:
+    """Migração inicial urllib→requests. Carrega os exemplos few-shot internamente."""
     resultado = no_migrar_com_llm(
         {"codigo_usuario": codigo_usuario, "codigo_migrado": "",
          "feedback_revisao": "", "status": ""},
-        exemplos_treino, prompt_sistema)
+        num_exemplos)
     return resultado.get("codigo_migrado", "") or ""
 
 
-def aplicar_feedback_revisao(codigo_usuario, codigo_migrado, feedback,
-                             exemplos_treino, prompt_sistema) -> str:
+def aplicar_feedback_revisao(codigo_usuario, codigo_migrado, feedback) -> str:
     """Refino incremental: aplica o relatório do review ao código migrado."""
     resultado = no_refinar_com_feedback(
         {"codigo_usuario": codigo_usuario, "codigo_migrado": codigo_migrado,
-         "feedback_revisao": feedback, "status": "migrado"},
-        exemplos_treino, prompt_sistema)
+         "feedback_revisao": feedback, "status": "migrado"})
     return resultado.get("codigo_migrado", codigo_migrado) or codigo_migrado
     
 if __name__ == "__main__":
@@ -577,21 +578,10 @@ if __name__ == "__main__":
     print("🤖 AGENTE DE MIGRAÇÃO COM IA - urllib → requests")
     print("=" * 80)
     
-    # Load training examples
-    print("\n📚 Carregando exemplos de treinamento...")
-    exemplos_treino = carregar_exemplos_treino(30)
-    
-    if not exemplos_treino:
-        print("❌ Não foi possível carregar exemplos de treinamento!")
-        exit(1)
-    
-    # Create training prompt
-    print("🧠 Criando prompt de treinamento com IA...")
-    prompt_sistema = criar_prompt_treino(exemplos_treino)
-    
-    # Create agent
+    # Create agent — os exemplos few-shot só são carregados dentro do nó
+    # `migrar`, e só rodam se `receber` validar que o input é urllib.
     print("🔧 Construindo agente de migração...")
-    agente = criar_agente_migracao(exemplos_treino, prompt_sistema)
+    agente = criar_agente_migracao(30)
 
     print("\n" + "=" * 80)
     print("📝 LENDO CÓDIGO DE url.py")
@@ -650,10 +640,7 @@ if __name__ == "__main__":
         print(f"❌ Failed to write migrated file: {e}")
     
     print("\n" + "=" * 80)
-    print("📚 INFORMAÇÕES DO TREINAMENTO:")
+    print("📚 STATUS:")
     print("=" * 80)
-    print(f"Exemplos carregados: {len(exemplos_treino)}")
-    print(f"Modelo: Groq - Llama 3.1 8B Instant")
-    print(f"Primeiro exemplo: {exemplos_treino[0]['repo']}")
-    print(f"Tipo: {exemplos_treino[0]['type']}")
+    print(f"Status final: {resultado.get('status', 'desconhecido')}")
     print("=" * 80)
